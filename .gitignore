@@ -1,0 +1,8 @@
+# Generated outputs — not tracked
+poc/sphere_scattering/outputs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
