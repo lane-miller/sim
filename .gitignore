@@ -1,5 +1,22 @@
-# Generated outputs — not tracked
-poc/sphere_scattering/outputs/
+# POC generated outputs — not tracked
+poc/**/outputs/
+
+# POC data & mesh artifacts
+poc/**/*.npy
+poc/**/*.npz
+poc/**/*.msh
+poc/**/*.vtk
+poc/**/*.vtu
+poc/**/*.h5
+poc/**/*.hdf5
+
+# POC plots & images
+poc/**/*.png
+poc/**/*.jpg
+poc/**/*.jpeg
+poc/**/*.gif
+poc/**/*.svg
+poc/**/*.pdf
 
 # Python
 __pycache__/
