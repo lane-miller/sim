@@ -18,6 +18,7 @@ FABIAN_ROOT = Path("/Volumes/LPM02 storage/Datasets/Audio/HRTF/FABIAN/FABIAN_HRT
 
 # Source mesh (original scan)
 MESH_ORIGINAL = FABIAN_ROOT / "2 SurfaceMeshes" / "FABIAN_6k_HATO0.stl"
+MESH_GRADED = OUTPUT_DIR / "FABIAN_6k_HATO0_graded.stl"
 
 # Processed mesh (truncated, recentered to interaural midpoint)
 PROJECT_ROOT = Path(__file__).parent

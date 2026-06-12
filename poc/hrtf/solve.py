@@ -4,30 +4,13 @@ HRTF POC — BEM Solve
 Exterior rigid scattering via Burton-Miller formulation.
 Point monopole source at left ear canal entrance (reciprocal HRTF).
 
-Far-field representation (exterior rigid scattering):
-    p_total(x) = p_inc(x) + D_pot[φ](x)
-
-Burton-Miller formulation (eliminates fictitious interior resonances):
-
+Burton-Miller formulation:
     (D - 0.5I - α*hyp) φ = -(p_inc + α * ∂p_inc/∂n)
 
-where:
-    D     = double-layer boundary operator
-    I     = identity
-    hyp   = Bempp hypersingular operator (= -H in standard convention)
-    α     = i/k  (Burton-Miller coupling constant)
-    φ     = total surface pressure (P1 nodal values)
-    p_inc = incident monopole: exp(ikr) / (4πr)
+Representation formula (exterior, rigid):
+    p_total(x) = p_inc(x) + D_pot[φ](x)
 
-Note on Bempp sign convention:
-    Bempp's hypersingular() returns -H relative to the standard BEM convention.
-    Standard BM: (D - 0.5I + αH)φ = RHS
-    In Bempp:    (D - 0.5I - α*hyp)φ = RHS   (since hyp = -H)
-    Ref: https://bempp.discourse.group/t/burton-miller-formulation-is-not-correct/254
-
-Function space:
-    "P", 1 (continuous piecewise linear) — required for the hypersingular
-    operator. DOFs = number of vertices, not faces.
+Bempp sign convention: hyp_bempp = -H_standard.
 """
 
 import numpy as np
@@ -39,29 +22,41 @@ import resource
 from pathlib import Path
 from scipy.sparse.linalg import gmres as scipy_gmres
 
+bempp.DEFAULT_DEVICE_INTERFACE = "opencl"
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 PROJECT_DIR = Path(__file__).parent
 OUTPUT_DIR = PROJECT_DIR / "outputs"
-MESH_STL = OUTPUT_DIR / "FABIAN_6k_HATO0_truncated.stl"
-OUTPUT_FILE = OUTPUT_DIR / "phi.npz"
+MESH_STL = OUTPUT_DIR / "FABIAN_6k_HATO0_graded.stl"
+OUTPUT_FILE = OUTPUT_DIR / "phi_graded.npz"
 
 C_AIR = 343.18
 SOURCE_LEFT_MM = np.array([-2.22, 66.23, -2.00])
 SOURCE_OFFSET_MM = 1.0
-# FREQUENCIES = np.geomspace(200.0, 6000.0, 5)
-FREQUENCIES = np.array([1000.0, 4000.0,])
+FREQUENCIES = np.array([1000.0, 4000.0])
 
-bempp.DEFAULT_DEVICE_INTERFACE = "opencl"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def get_mem_gb():
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    rss = usage.ru_maxrss
+    if platform.system() == "Darwin":
+        return rss / 1e9
+    else:
+        return rss / 1e6
+
 
 # ---------------------------------------------------------------------------
 # Load mesh, convert mm → m
 # ---------------------------------------------------------------------------
 tm = trimesh.load(str(MESH_STL), force="mesh")
 
-vertices = (tm.vertices / 1000.0).astype(np.float64).T   # (3, N_verts)
-elements = tm.faces.astype(np.int32).T                     # (3, N_faces)
+vertices = (tm.vertices / 1000.0).astype(np.float64).T
+elements = tm.faces.astype(np.int32).T
 
 grid = bempp.Grid(vertices, elements)
 space = bempp.function_space(grid, "P", 1)
@@ -88,19 +83,6 @@ source_m = source_mm / 1000.0
 print(f"Source (mm): ({source_mm[0]:.2f}, {source_mm[1]:.2f}, {source_mm[2]:.2f})")
 print(f"Normal:      ({local_normal[0]:.3f}, {local_normal[1]:.3f}, {local_normal[2]:.3f})")
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def get_mem_gb():
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    rss = usage.ru_maxrss
-    if platform.system() == "Darwin":
-        return rss / 1e9
-    else:
-        return rss / 1e6
-
-
 # ---------------------------------------------------------------------------
 # BEM solve — frequency loop
 # ---------------------------------------------------------------------------
@@ -117,7 +99,6 @@ for i, freq in enumerate(FREQUENCIES):
     print(f"\n[{i + 1}/{len(FREQUENCIES)}] f={freq:.1f} Hz  k={k:.4f}  "
           f"λ={C_AIR / freq * 1000:.1f} mm")
 
-    # -- Assembly --
     t_asm = time.perf_counter()
 
     @bempp.complex_callable
@@ -143,10 +124,7 @@ for i, freq in enumerate(FREQUENCIES):
     dlp = bempp.operators.boundary.helmholtz.double_layer(space, space, space, k)
     hyp = bempp.operators.boundary.helmholtz.hypersingular(space, space, space, k)
 
-    # Burton-Miller LHS: (D - 0.5I - α*hyp)  [hyp = -H in standard convention]
     lhs = dlp - 0.5 * identity - alpha * hyp
-
-    # Burton-Miller RHS: -(p_inc + α * ∂p_inc/∂n)
     rhs = -(p_inc_fun + alpha * dp_inc_dn_fun)
 
     A_discrete = lhs.weak_form()
@@ -155,7 +133,7 @@ for i, freq in enumerate(FREQUENCIES):
     dt_asm = time.perf_counter() - t_asm
     print(f"  Assembly: {dt_asm:.1f}s  mem={get_mem_gb():.2f} GB")
 
-    # -- GMRES solve via scipy --
+    # -- GMRES solve --
     iter_state = [0, time.perf_counter()]
 
     def gmres_callback(residual_norm):

@@ -24,8 +24,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 PROJECT_DIR = Path(__file__).parent
 OUTPUT_DIR = PROJECT_DIR / "outputs"
-MESH_STL = OUTPUT_DIR / "FABIAN_6k_HATO0_truncated.stl"
-PHI_FILE = OUTPUT_DIR / "phi.npz"
+MESH_STL = OUTPUT_DIR / "FABIAN_6k_HATO0_graded.stl"
+PHI_FILE = OUTPUT_DIR / "phi_graded.npz"
 
 FABIAN_ROOT = Path(
     "/Volumes/LPM02 storage/Datasets/Audio/HRTF/FABIAN/FABIAN_HRTF_DATABASE_v4"
