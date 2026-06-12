@@ -14,21 +14,35 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).parent
+OUTPUT_DIR = PROJECT_ROOT / "outputs"
+
 FABIAN_ROOT = Path("/Volumes/LPM02 storage/Datasets/Audio/HRTF/FABIAN/FABIAN_HRTF_DATABASE_v4")
 
 # Source mesh (original scan)
 MESH_ORIGINAL = FABIAN_ROOT / "2 SurfaceMeshes" / "FABIAN_6k_HATO0.stl"
 MESH_GRADED = OUTPUT_DIR / "FABIAN_6k_HATO0_graded.stl"
-
-# Processed mesh (truncated, recentered to interaural midpoint)
-PROJECT_ROOT = Path(__file__).parent
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
 MESH_TRUNCATED = OUTPUT_DIR / "FABIAN_6k_HATO0_truncated.stl"
 
+# Banded meshes
+BAND_MESH_LOW = OUTPUT_DIR / "FABIAN_band_low.stl"
+BAND_MESH_MID = OUTPUT_DIR / "FABIAN_band_mid.stl"
+BAND_MESH_HIGH = OUTPUT_DIR / "FABIAN_band_high.stl"
+
+BAND_LIMITS = [
+    (200.0, 2000.0, BAND_MESH_LOW),
+    (2000.0, 6000.0, BAND_MESH_MID),
+    (6000.0, 12000.0, BAND_MESH_HIGH),
+]
+
 # Reference HRTFs (SOFA format)
-HRIR_DIR = FABIAN_ROOT / "1 HRIRs"
+HRIR_DIR = FABIAN_ROOT / "1 HRIRs" / "SOFA"
 HRIR_MEASURED = HRIR_DIR / "FABIAN_HRIR_measured_HATO_0.sofa"
 HRIR_SIMULATED = HRIR_DIR / "FABIAN_HRIR_modeled_HATO_0.sofa"
+
+# Pipeline outputs
+PHI_BANDED = OUTPUT_DIR / "phi_banded.npz"
+HRTF_INTERP = OUTPUT_DIR / "hrtf_interp.npz"
 
 # ---------------------------------------------------------------------------
 # Mesh coordinate convention (native STL frame, post-recentering)
@@ -47,12 +61,10 @@ RHO_AIR = 1.1839      # kg/m³
 
 # ---------------------------------------------------------------------------
 # Reciprocal source positions (mm, in recentered mesh frame)
-# From mesh.py output — shared vertices of ear canal element clusters.
-# These sit ON the surface; solve.py must offset ~1mm outward along
-# the local surface normal to avoid Green's function singularity.
 # ---------------------------------------------------------------------------
 SOURCE_LEFT_MM = np.array([-2.22, 66.23, -2.00])
 SOURCE_RIGHT_MM = np.array([2.22, -66.23, 2.00])
+SOURCE_OFFSET_MM = 1.0
 
 # ---------------------------------------------------------------------------
 # Evaluation sphere (for reciprocal HRTF extraction)
