@@ -4,6 +4,9 @@ HRTF POC — BEM Solve
 Exterior rigid scattering via Burton-Miller formulation.
 Point monopole source at left ear canal entrance (reciprocal HRTF).
 
+Far-field representation (exterior rigid scattering):
+    p_total(x) = p_inc(x) + D_pot[φ](x)
+
 Burton-Miller formulation (eliminates fictitious interior resonances):
 
     (D - 0.5I - α*hyp) φ = -(p_inc + α * ∂p_inc/∂n)
@@ -48,7 +51,7 @@ C_AIR = 343.18
 SOURCE_LEFT_MM = np.array([-2.22, 66.23, -2.00])
 SOURCE_OFFSET_MM = 1.0
 # FREQUENCIES = np.geomspace(200.0, 6000.0, 5)
-FREQUENCIES = np.array([500.0, 1000.0, 2000.0, 4000.0,])
+FREQUENCIES = np.array([1000.0, 4000.0,])
 
 bempp.DEFAULT_DEVICE_INTERFACE = "opencl"
 
@@ -147,7 +150,7 @@ for i, freq in enumerate(FREQUENCIES):
     rhs = -(p_inc_fun + alpha * dp_inc_dn_fun)
 
     A_discrete = lhs.weak_form()
-    b_vec = rhs.coefficients
+    b_vec = rhs.projections(lhs.dual_to_range)
 
     dt_asm = time.perf_counter() - t_asm
     print(f"  Assembly: {dt_asm:.1f}s  mem={get_mem_gb():.2f} GB")

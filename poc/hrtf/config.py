@@ -56,7 +56,7 @@ SOURCE_RIGHT_MM = np.array([2.22, -66.23, 2.00])
 # ---------------------------------------------------------------------------
 # Evaluation sphere (for reciprocal HRTF extraction)
 # ---------------------------------------------------------------------------
-EVAL_RADIUS_M = 1.5   # meters — typical HRTF measurement distance
+EVAL_RADIUS_M = 1.7   # meters — FABIAN SOFA measurement radius
 EVAL_THETA = [0.0]    # degrees elevation (start with horizontal plane only)
 EVAL_PHI_STEP = 5.0   # degrees azimuth step
 

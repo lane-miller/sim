@@ -212,3 +212,19 @@ for i, freq in enumerate(frequencies):
     rmse = np.sqrt(np.mean((hrtf_bem_db[:, i] - hrtf_meas_db[:, i]) ** 2))
     rmse_sim = np.sqrt(np.mean((hrtf_sim_db[:, i] - hrtf_meas_db[:, i]) ** 2))
     print(f"  {freq:6.0f} Hz:  Bempp={rmse:.2f} dB   Mesh2HRTF={rmse_sim:.2f} dB")
+
+
+# Quick pattern diagnostic
+for i, freq in enumerate(frequencies):
+    h = np.abs(hrtf_bem[:, i])
+    az_max = horiz_az[np.argmax(h)]
+    az_min = horiz_az[np.argmin(h)]
+    ild = 20 * np.log10(h.max() / h.min())
+    print(f"  {freq:.0f} Hz: max at az={az_max:.0f}°  min at az={az_min:.0f}°  "
+          f"ILD={ild:.1f} dB")
+    
+    # Same for measured reference
+    h_m = np.abs(hrtf_meas_at_f[:, i])
+    az_max_m = horiz_az[np.argmax(h_m)]
+    az_min_m = horiz_az[np.argmin(h_m)]
+    print(f"         ref: max at az={az_max_m:.0f}°  min at az={az_min_m:.0f}°")
