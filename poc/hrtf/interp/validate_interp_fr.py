@@ -15,6 +15,7 @@ sys.path.insert(0, str(HRTF_ROOT))
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.signal import correlate, hilbert
 
 from common.sofa import (
     canonical_directions,
@@ -29,6 +30,26 @@ CANONICAL_AZ = [0.0, 90.0, 180.0, 270.0]
 DIRECTION_NAMES = ["Front", "Left (ipsilateral)", "Back", "Right (contralateral)"]
 FREQ_PLOT_MIN = 100.0
 FREQ_PLOT_MAX = 15000.0
+
+
+def envelope_peak(hrir):
+    """Sample index of the analytic-envelope peak."""
+    return int(np.argmax(np.abs(hilbert(hrir))))
+
+
+def circshift_align(ref, sig):
+    """Circshift sig to maximize correlation with ref."""
+    n = len(ref)
+    lag = int(np.argmax(correlate(ref, sig, mode="full")) - (n - 1))
+    return np.roll(sig, lag), lag
+
+
+def hrtf_to_hrir(hrtf, source_freqs, n_samples, sample_rate):
+    """Interpolate complex HRTF onto the SOFA rFFT grid and invert."""
+    grid_freqs = np.fft.rfftfreq(n_samples, d=1.0 / sample_rate)
+    hrtf_on_grid = interp_hrtf(hrtf, source_freqs, grid_freqs)
+    return np.fft.irfft(hrtf_on_grid, n=n_samples, axis=1)
+
 
 data = np.load(HRTF_INTERP)
 target_freqs = data["target_freqs"]
@@ -125,6 +146,71 @@ out_path = OUTPUT_DIR / "hrtf_validation_interp_fr.png"
 plt.savefig(out_path, dpi=150, bbox_inches="tight")
 plt.show()
 print(f"Saved: {out_path}")
+
+n_samples = sofa_ir.shape[2]
+hrir_sim = sofa_ir_sim[sofa_dir_idx, 0, :].astype(float)
+hrir_bem = hrtf_to_hrir(hrtf_bem_dense, target_freqs, n_samples, sofa_fs)
+
+hrir_sim_phase = np.zeros_like(hrir_sim)
+hrir_bem_phase = np.zeros_like(hrir_bem)
+print("\nBulk delay removal (circshift envelope peak → sample 0):")
+for d, name in enumerate(DIRECTION_NAMES):
+    hrir_bem_d, rel_lag = circshift_align(hrir_sim[d], hrir_bem[d])
+    bulk = envelope_peak(hrir_sim[d])
+    hrir_sim_phase[d] = np.roll(hrir_sim[d], -bulk)
+    hrir_bem_phase[d] = np.roll(hrir_bem_d, -bulk)
+    print(
+        f"  {name:24s}: bulk circshift -{bulk:4d}  "
+        f"bem rel circshift {rel_lag:+4d} ({1e3 * rel_lag / sofa_fs:+.3f} ms)"
+    )
+
+hrtf_sim_aligned = np.fft.rfft(hrir_sim_phase, axis=1)
+hrtf_bem_aligned = np.fft.rfft(hrir_bem_phase, axis=1)
+
+phase_sim = np.degrees(np.unwrap(np.angle(hrtf_sim_aligned), axis=1))
+phase_bem = np.degrees(np.unwrap(np.angle(hrtf_bem_aligned), axis=1))
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharey=True)
+fig.suptitle(
+    "HRTF Phase — Bulk-Delay Removed BEM vs Mesh2HRTF",
+    fontsize=14, y=0.98,
+)
+
+for ax, dir_idx, name, az in zip(
+    axes.ravel(), range(len(CANONICAL_AZ)), DIRECTION_NAMES, CANONICAL_AZ
+):
+    ax.semilogx(
+        sofa_freqs_plot, phase_sim[dir_idx, plot_mask],
+        "b--", linewidth=1.0, label="Mesh2HRTF",
+    )
+    ax.semilogx(
+        sofa_freqs_plot, phase_bem[dir_idx, plot_mask],
+        "r-", linewidth=1.0, label="Bempp dense (interp)",
+    )
+    ax.set_title(f"{name}  (az={az:.0f}°)")
+    ax.set_xlim(FREQ_PLOT_MIN, FREQ_PLOT_MAX)
+    ax.set_xlabel("Frequency (Hz)")
+    ax.grid(True, which="both", alpha=0.3)
+
+axes[0, 0].set_ylabel("Unwrapped phase (deg)")
+axes[1, 0].set_ylabel("Unwrapped phase (deg)")
+
+all_phase = np.concatenate([
+    phase_sim[:, plot_mask].ravel(),
+    phase_bem[:, plot_mask].ravel(),
+])
+y_pad = max(45.0, 0.05 * (all_phase.max() - all_phase.min()))
+y_min = np.floor((all_phase.min() - y_pad) / 45.0) * 45.0
+y_max = np.ceil((all_phase.max() + y_pad) / 45.0) * 45.0
+for ax in axes.ravel():
+    ax.set_ylim(y_min, y_max)
+
+axes[0, 0].legend(loc="best", fontsize=7)
+plt.tight_layout()
+phase_out_path = OUTPUT_DIR / "hrtf_validation_interp_fr_phase.png"
+plt.savefig(phase_out_path, dpi=150, bbox_inches="tight")
+plt.show()
+print(f"Saved: {phase_out_path}")
 
 # Interpolation error at expansion frequencies
 print("\nInterpolation error at expansion points (dB, dense − sparse):")
