@@ -26,16 +26,31 @@ from common.bem import (
 from common.sofa import horizontal_plane_from_sofa, interp_hrtf_spline, load_sofa_pair
 from config import BAND_LIMITS, HRTF_INTERP
 
-TARGET_FREQS = np.arange(200.0, 12200.0, 200.0)
+TARGET_FREQS = np.geomspace(200.0, 12000.0, 60)
 N_EXPANSION = 20
 BAND_BOUNDARIES = [2000.0, 6000.0]
+# Per-band solve density: low / mid / high (must match len(BAND_BOUNDARIES) + 1)
+BAND_WEIGHTS = [1, 2, 3]
 
 
-def select_expansion_points(target_freqs, n_points, band_boundaries):
+def select_expansion_points(target_freqs, n_points, band_boundaries, band_weights=BAND_WEIGHTS):
+    """Place expansion points with higher density in upper frequency bands."""
     f_min, f_max = target_freqs[0], target_freqs[-1]
-    base = np.geomspace(f_min, f_max, n_points)
-    required = np.array([f_min, f_max] + list(band_boundaries))
-    combined = np.unique(np.concatenate([base, required]))
+    edges = [f_min, *band_boundaries, f_max]
+    n_bands = len(edges) - 1
+
+    weights = np.asarray(band_weights[:n_bands], dtype=float)
+    # Shared band edges are duplicated when bands are concatenated.
+    n_raw = n_points + (n_bands - 1)
+    fracs = weights / weights.sum()
+    n_per_band = np.floor(fracs * n_raw).astype(int)
+    for i in np.argsort(fracs * n_raw - n_per_band)[::-1][: n_raw - n_per_band.sum()]:
+        n_per_band[i] += 1
+
+    combined = np.concatenate([
+        np.geomspace(edges[i], edges[i + 1], n_per_band[i])
+        for i in range(n_bands)
+    ])
     snapped = np.array([
         target_freqs[np.argmin(np.abs(target_freqs - f))] for f in combined
     ])

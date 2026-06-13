@@ -73,30 +73,26 @@ for i in range(len(target_freqs)):
     hrtf_meas_at_f[:, i] *= meas_scale_at_f[i]
     hrtf_sim_at_f[:, i] *= sim_scale_at_f[i]
 
-meas_scale_full = interp_scale(meas_scale_at_f, target_freqs, sofa_freqs)
 sim_scale_full = interp_scale(sim_scale_at_f, target_freqs, sofa_freqs)
 
-hrtf_meas_plot = hrtf_meas_full * meas_scale_full[np.newaxis, :]
 hrtf_sim_plot = hrtf_sim_full * sim_scale_full[np.newaxis, :]
 
 plot_mask = (sofa_freqs >= FREQ_PLOT_MIN) & (sofa_freqs <= FREQ_PLOT_MAX)
 sofa_freqs_plot = sofa_freqs[plot_mask]
 
-hrtf_meas_db = to_db(hrtf_meas_plot[:, plot_mask])
 hrtf_sim_db = to_db(hrtf_sim_plot[:, plot_mask])
 hrtf_bem_dense_db = to_db(hrtf_bem_dense)
 hrtf_bem_sparse_db = to_db(hrtf_bem_sparse)
 
 fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharey=True)
 fig.suptitle(
-    "HRTF Frequency Response — Interpolated BEM vs FABIAN Reference",
+    "HRTF Frequency Response — Interpolated BEM vs Mesh2HRTF",
     fontsize=14, y=0.98,
 )
 
 for ax, dir_idx, name, az in zip(
     axes.ravel(), range(len(CANONICAL_AZ)), DIRECTION_NAMES, CANONICAL_AZ
 ):
-    ax.semilogx(sofa_freqs_plot, hrtf_meas_db[dir_idx, :], "k-", linewidth=1.0, label="Measured")
     ax.semilogx(sofa_freqs_plot, hrtf_sim_db[dir_idx, :], "b--", linewidth=1.0, label="Mesh2HRTF")
     ax.plot(
         target_freqs, hrtf_bem_dense_db[dir_idx, :],
@@ -115,7 +111,7 @@ axes[0, 0].set_ylabel("HRTF magnitude (dB)")
 axes[1, 0].set_ylabel("HRTF magnitude (dB)")
 
 all_db = np.concatenate([
-    hrtf_meas_db.ravel(), hrtf_sim_db.ravel(),
+    hrtf_sim_db.ravel(),
     hrtf_bem_dense_db.ravel(), hrtf_bem_sparse_db.ravel(),
 ])
 y_min = np.floor(all_db.min() / 5.0) * 5.0
