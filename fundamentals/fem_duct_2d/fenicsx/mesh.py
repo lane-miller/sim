@@ -12,7 +12,7 @@ def build_mesh():
     # --- Geometry ---
     # Four corner points: (x, y, z, mesh_size)
     # Mesh size here is a target element size — we'll aim for ~lambda/10
-    lc = min(L, H) / 10
+    lc = min(L, H) / 6
 
     p1 = gmsh.model.geo.addPoint(0, 0, 0, lc)  # bottom-left  (inlet)
     p2 = gmsh.model.geo.addPoint(L, 0, 0, lc)  # bottom-right (outlet)
