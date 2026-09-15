@@ -1,0 +1,60 @@
+{
+  "ka": 0.5,
+  "tagging": {
+    "n_piston_elements": 998,
+    "area_piston_m2": 0.1764,
+    "area_analytic_m2": 0.0003141592653589793,
+    "area_ratio": 561.4986392282068,
+    "r_piston_min_m": 0.006006459119349454,
+    "r_piston_max_m": 0.2854558919607424,
+    "r_baffle_top_min_m": 0.2100264533603115
+  },
+  "analytical": {
+    "re": 0.1198988285101329,
+    "im": 0.39691467240388884
+  },
+  "runs": [
+    {
+      "label": "baseline",
+      "mesh_file": "mesh_ka0p5.msh",
+      "h_piston_note": "baseline",
+      "n_elements": 2128,
+      "n_dofs": 1066,
+      "n_piston_elements": 998,
+      "solver": "gmres",
+      "linear_solve_info": 0,
+      "Z_rad_norm_real": 0.8513992646349475,
+      "Z_rad_norm_imag": 0.27605702332352994,
+      "err_re_pct": 610.0980678580976,
+      "err_im_pct": 30.449277258608788
+    },
+    {
+      "label": "half_hpiston",
+      "mesh_file": "mesh_ka0p5_half_hpiston.msh",
+      "h_piston_note": "half_hpiston",
+      "n_elements": 2128,
+      "n_dofs": 1066,
+      "n_piston_elements": 998,
+      "solver": "gmres",
+      "linear_solve_info": 0,
+      "Z_rad_norm_real": 0.8513992646349475,
+      "Z_rad_norm_imag": 0.27605702332352994,
+      "err_re_pct": 610.0980678580976,
+      "err_im_pct": 30.449277258608788
+    },
+    {
+      "label": "rim_band",
+      "mesh_file": "mesh_ka0p5_rim_band.msh",
+      "h_piston_note": "rim_band",
+      "n_elements": 2128,
+      "n_dofs": 1066,
+      "n_piston_elements": 998,
+      "solver": "gmres",
+      "linear_solve_info": 0,
+      "Z_rad_norm_real": 0.8513992646349475,
+      "Z_rad_norm_imag": 0.27605702332352994,
+      "err_re_pct": 610.0980678580976,
+      "err_im_pct": 30.449277258608788
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+[
+  {
+    "ka": 0.05,
+    "solver": "direct",
+    "linear_solve_info": 0,
+    "Z_rad_norm_real": -0.713236321717337,
+    "Z_rad_norm_imag": 0.08717975517069672,
+    "err_re_pct": 57182.68523509798,
+    "err_im_pct": 105.5494526118585
+  },
+  {
+    "ka": 0.1,
+    "solver": "direct",
+    "linear_solve_info": 0,
+    "Z_rad_norm_real": 1.2445506069023755,
+    "Z_rad_norm_imag": 0.07547523991593172,
+    "err_re_pct": 24832.53174641799,
+    "err_im_pct": 10.845353595276569
+  }
+]

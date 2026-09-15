@@ -1,0 +1,16 @@
+{
+  "ka": 1.0,
+  "f_hz": 5459.0145480520105,
+  "k": 100.0,
+  "a_sphere_m": 0.01,
+  "mesh_file": "sphere_ka1.msh",
+  "n_elements": 1108,
+  "n_dofs": 556,
+  "assembly_time_s": 0.0,
+  "linear_solve_time_s": 2.469431000004988,
+  "gmres_iters": 0,
+  "solve_time_s": 2.469431000004988,
+  "linear_solve_info": 0,
+  "Z_rad_norm_real": 0.4988990357909975,
+  "Z_rad_norm_imag": 0.5005691312015884
+}

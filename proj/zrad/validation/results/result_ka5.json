@@ -1,0 +1,18 @@
+{
+  "ka": 5.0,
+  "f_hz": 27295.07274026005,
+  "k": 500.0,
+  "L_baffle_m": 0.03,
+  "mesh_file": "mesh_ka5.msh",
+  "n_elements": 4376,
+  "n_dofs": 2190,
+  "n_piston_elements": 292,
+  "solver": "direct",
+  "assembly_time_s": 15.538304249988869,
+  "linear_solve_time_s": 1.1920333330053836,
+  "gmres_iters": 0,
+  "solve_time_s": 16.730337582994252,
+  "linear_solve_info": 0,
+  "Z_rad_norm_real": 0.9908511847280879,
+  "Z_rad_norm_imag": 0.1746118937054159
+}
