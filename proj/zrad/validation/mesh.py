@@ -163,22 +163,43 @@ def _surface_max_radius(surf_tag, n_curve_samples=32):
     return max_r
 
 
-def _classify_surfaces(L, t, tol=None):
+def _classify_surfaces(L, t, tol=None, a=None, origin=(0.0, 0.0)):
     """Assign each boundary surface to piston (top disk) or baffle.
 
-    Uses max radial extent of boundary points (not center-of-mass or area):
+    Uses max radial extent of boundary points from ``origin`` (piston center):
       piston: max(r) <= a + tol
       baffle: max(r) >  a + tol
     """
+    if a is None:
+        a = A
     if tol is None:
-        tol = max(A * 1e-6, L * 1e-6, 1e-9)
+        tol = max(a * 1e-6, L * 1e-6, 1e-9)
 
+    ox, oy = origin
     piston = []
     baffle = []
 
     for dim, tag in gmsh.model.getEntities(2):
         r_max = _surface_max_radius(tag)
-        if r_max <= A + tol:
+        # Recompute max radius about piston center when origin != (0, 0).
+        if ox != 0.0 or oy != 0.0:
+            r_max = 0.0
+            boundaries = gmsh.model.getBoundary(
+                [(2, tag)], combined=False, oriented=False, recursive=False
+            )
+            for bdim, btag in boundaries:
+                if bdim == 0:
+                    xyz = gmsh.model.getValue(0, btag, [])
+                    r_max = max(r_max, np.hypot(xyz[0] - ox, xyz[1] - oy))
+                elif bdim == 1:
+                    umin, umax = gmsh.model.getParametrizationBounds(1, btag)
+                    umin = float(np.asarray(umin).flat[0])
+                    umax = float(np.asarray(umax).flat[0])
+                    for i in range(33):
+                        u = umin + (umax - umin) * i / 32
+                        xyz = gmsh.model.getValue(1, btag, [u])
+                        r_max = max(r_max, np.hypot(xyz[0] - ox, xyz[1] - oy))
+        if r_max <= a + tol:
             piston.append(tag)
         else:
             baffle.append(tag)
@@ -186,10 +207,13 @@ def _classify_surfaces(L, t, tol=None):
     return piston, baffle
 
 
-def _compute_h_piston():
+def _compute_h_piston(a=None):
     """Piston target element size — decoupled from h_outer / wavelength grading."""
-    h_circ = 2.0 * np.pi * A / PISTON_CIRC_ELEMENTS
-    return min(H_PISTON_LOCAL, h_circ)
+    if a is None:
+        a = A
+    h_circ = 2.0 * np.pi * a / PISTON_CIRC_ELEMENTS
+    h_local = a / 15.0
+    return min(h_local, h_circ)
 
 
 def _piston_rim_curves(piston_surfs):
@@ -204,13 +228,15 @@ def _piston_rim_curves(piston_surfs):
     return curves
 
 
-def _set_piston_boundary_mesh(piston_surfs, h_piston):
+def _set_piston_boundary_mesh(piston_surfs, h_piston, a=None):
     """Force rim 1D resolution: transfinite seed + setSize backup.
 
     Background mesh fields override setSize alone; transfiniteCurve pins the
     shared piston/baffle-rim edge before 2D meshing.
     """
-    n_circ = max(PISTON_CIRC_ELEMENTS, int(np.ceil(2.0 * np.pi * A / h_piston)))
+    if a is None:
+        a = A
+    n_circ = max(PISTON_CIRC_ELEMENTS, int(np.ceil(2.0 * np.pi * a / h_piston)))
     curves = _piston_rim_curves(piston_surfs)
     for ctag in curves:
         gmsh.model.mesh.setSize([(1, ctag)], h_piston)
@@ -218,9 +244,20 @@ def _set_piston_boundary_mesh(piston_surfs, h_piston):
     return curves, n_circ
 
 
-def _setup_mesh_fields(piston_surfs, baffle_surfs, h_piston, h_outer, piston_curves):
+def _setup_mesh_fields(
+    piston_surfs,
+    baffle_surfs,
+    h_piston,
+    h_outer,
+    piston_curves,
+    a=None,
+    piston_center=(0.0, 0.0),
+):
     """Background sizing: graded baffle only + constant piston disk and rim."""
+    if a is None:
+        a = A
     t = THICKNESS
+    px, py = piston_center
 
     gmsh.option.setNumber("Mesh.CharacteristicLengthFromCurvature", 0)
     gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 0)
@@ -230,9 +267,9 @@ def _setup_mesh_fields(piston_surfs, baffle_surfs, h_piston, h_outer, piston_cur
     gmsh.model.mesh.field.add("Ball", 1)
     gmsh.model.mesh.field.setNumber(1, "VIn", h_piston)
     gmsh.model.mesh.field.setNumber(1, "VOut", h_outer)
-    gmsh.model.mesh.field.setNumber(1, "Radius", A)
-    gmsh.model.mesh.field.setNumber(1, "XCenter", 0.0)
-    gmsh.model.mesh.field.setNumber(1, "YCenter", 0.0)
+    gmsh.model.mesh.field.setNumber(1, "Radius", a)
+    gmsh.model.mesh.field.setNumber(1, "XCenter", px)
+    gmsh.model.mesh.field.setNumber(1, "YCenter", py)
     gmsh.model.mesh.field.setNumber(1, "ZCenter", t / 2)
 
     gmsh.model.mesh.field.add("Restrict", 2)
@@ -244,7 +281,7 @@ def _setup_mesh_fields(piston_surfs, baffle_surfs, h_piston, h_outer, piston_cur
     gmsh.model.mesh.field.setNumber(3, "SizeMin", h_piston)
     gmsh.model.mesh.field.setNumber(3, "SizeMax", h_outer)
     gmsh.model.mesh.field.setNumber(3, "DistMin", 0.0)
-    gmsh.model.mesh.field.setNumber(3, "DistMax", A)
+    gmsh.model.mesh.field.setNumber(3, "DistMax", a)
 
     # Constant sizing on piston disk faces.
     gmsh.model.mesh.field.add("Constant", 4)
@@ -356,6 +393,188 @@ def generate_mesh(ka, kd=None, gui=False):
 
     gmsh.finalize()
     return out_path
+
+
+def _mesh_element_stats():
+    """Return element count and edge-length / quality stats for the current 2D mesh."""
+    elem_types, elem_tags, _ = gmsh.model.mesh.getElements(2)
+    n_tri = sum(len(tags) for tags in elem_tags)
+
+    node_tags, coord_flat, _ = gmsh.model.mesh.getNodes()
+    node_coords = {
+        tag: np.array(coord_flat[3 * i : 3 * i + 3])
+        for i, tag in enumerate(node_tags)
+    }
+
+    sizes = []
+    quality_ratios = []
+    top_quality_ratios = []
+    t = THICKNESS
+
+    for tags in elem_tags:
+        for et in tags:
+            _, elem_node_tags, _, _ = gmsh.model.mesh.getElement(et)
+            pts = [node_coords[n] for n in elem_node_tags]
+            edges = []
+            for i in range(len(pts)):
+                j = (i + 1) % len(pts)
+                edges.append(np.linalg.norm(pts[i] - pts[j]))
+            sizes.extend(edges)
+            if edges:
+                q = min(edges) / max(edges)
+                quality_ratios.append(q)
+                z_mean = float(np.mean([p[2] for p in pts]))
+                if z_mean > 0.0:
+                    top_quality_ratios.append(q)
+
+    h_min = min(sizes) if sizes else float("nan")
+    h_max = max(sizes) if sizes else float("nan")
+    q_min = min(quality_ratios) if quality_ratios else float("nan")
+    q_mean = float(np.mean(quality_ratios)) if quality_ratios else float("nan")
+    n_sliver = sum(1 for q in quality_ratios if q < 0.05)
+    top_q_min = min(top_quality_ratios) if top_quality_ratios else float("nan")
+    top_n_sliver = sum(1 for q in top_quality_ratios if q < 0.05)
+
+    return {
+        "n_elements": n_tri,
+        "h_min_m": h_min,
+        "h_max_m": h_max,
+        "quality_min": q_min,
+        "quality_mean": q_mean,
+        "n_sliver_elements": n_sliver,
+        "top_quality_min": top_q_min,
+        "top_n_sliver_elements": top_n_sliver,
+    }
+
+
+def fixed_baffle_mesh_path(ka, position_label, a=None, mesh_dir=None):
+    """Path for fixed-size baffle pilot meshes."""
+    if a is None:
+        a = A
+    tag = f"{ka:g}".replace(".", "p")
+    a_tag = f"{a:g}".replace(".", "p")
+    base = mesh_dir or os.path.join(MESH_DIR, "offcenter_pilot")
+    return os.path.join(base, f"mesh_ka{tag}_a{a_tag}_{position_label}.msh")
+
+
+def generate_fixed_baffle_mesh(
+    ka,
+    a,
+    lx,
+    ly,
+    piston_dx=0.0,
+    piston_dy=0.0,
+    position_label="centered",
+    thickness=None,
+    out_path=None,
+    mesh_dir=None,
+    gui=False,
+):
+    """Build a closed-surface mesh: fixed rectangular baffle, piston at origin.
+
+    Origin is the piston center. ``piston_dx``/``piston_dy`` are the piston
+    offset from the baffle center (same convention as the parametric sweep).
+    """
+    if thickness is None:
+        thickness = a / 30.0
+    k = ka / a
+    f = k * C / (2.0 * np.pi)
+    wavelength = 2.0 * np.pi / k
+    h_outer = wavelength / 6.0
+    h_piston = _compute_h_piston(a=a)
+    L_ref = max(lx, ly) / 2.0
+
+    # Baffle box in piston-centered frame: center at (-piston_dx, -piston_dy).
+    x0 = -lx / 2.0 - piston_dx
+    y0 = -ly / 2.0 - piston_dy
+
+    gmsh.initialize()
+    gmsh.model.add(f"fixed_baffle_ka{ka:g}_{position_label}")
+
+    occ = gmsh.model.occ
+    t = thickness
+
+    box = occ.addBox(x0, y0, -t / 2, lx, ly, t)
+    occ.synchronize()
+
+    disk = occ.addDisk(0.0, 0.0, t / 2, a, a, zAxis=[0, 0, 1])
+    occ.fragment([(3, box)], [(2, disk)])
+    occ.synchronize()
+
+    piston_surfs, baffle_surfs = _classify_surfaces(L_ref, t, a=a, origin=(0.0, 0.0))
+
+    if not piston_surfs:
+        gmsh.finalize()
+        raise RuntimeError(
+            f"No piston surfaces found for ka={ka:g} position={position_label}"
+        )
+
+    gmsh.model.addPhysicalGroup(2, piston_surfs, tag=PISTON_TAG, name="piston")
+    gmsh.model.addPhysicalGroup(2, baffle_surfs, tag=BAFFLE_TAG, name="baffle")
+
+    piston_curves, n_circ = _set_piston_boundary_mesh(piston_surfs, h_piston, a=a)
+    _setup_mesh_fields(
+        piston_surfs,
+        baffle_surfs,
+        h_piston,
+        h_outer,
+        piston_curves,
+        a=a,
+        piston_center=(0.0, 0.0),
+    )
+    gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+    gmsh.model.mesh.generate(2)
+
+    n_piston_tri = 0
+    for st in piston_surfs:
+        _, tags, _ = gmsh.model.mesh.getElements(2, st)
+        n_piston_tri += sum(len(tg) for tg in tags)
+
+    stats = _mesh_element_stats()
+    if out_path is None:
+        out_path = fixed_baffle_mesh_path(ka, position_label, a=a, mesh_dir=mesh_dir)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    gmsh.write(out_path)
+
+    print(
+        f"ka={ka:g}  pos={position_label}  f={f:.1f} Hz  "
+        f"Lx={lx:.3f} m  Ly={ly:.3f} m  offset=({piston_dx:.5f}, {piston_dy:.5f})"
+    )
+    print(
+        f"  Target h: piston={h_piston:.6f} m  outer={h_outer:.6f} m  (λ/6)"
+        f"  [circ={n_circ}]"
+    )
+    print(
+        f"  Elements : {stats['n_elements']}  (piston: {n_piston_tri})"
+        f"  h_min={stats['h_min_m']:.6f}  h_max={stats['h_max_m']:.6f}"
+    )
+    print(
+        f"  Quality  : min={stats['quality_min']:.4f}  mean={stats['quality_mean']:.4f}"
+        f"  sliver(all)={stats['n_sliver_elements']}"
+        f"  top-sliver={stats['top_n_sliver_elements']}"
+    )
+    print(f"  Piston surfaces: {len(piston_surfs)}  Baffle surfaces: {len(baffle_surfs)}")
+    print(f"  Written  : {out_path}")
+
+    if gui:
+        gmsh.fltk.run()
+
+    gmsh.finalize()
+
+    return {
+        "mesh_path": out_path,
+        "ka": ka,
+        "a_m": a,
+        "lx_m": lx,
+        "ly_m": ly,
+        "piston_dx_m": piston_dx,
+        "piston_dy_m": piston_dy,
+        "position_label": position_label,
+        "n_piston_elements": n_piston_tri,
+        "thickness_m": thickness,
+        "L_baffle_m": L_ref,
+        **stats,
+    }
 
 
 def main():

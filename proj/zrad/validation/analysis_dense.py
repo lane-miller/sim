@@ -112,6 +112,9 @@ def make_plot(bem_results, plot_file=PLOT_FILE):
     axes[1].grid(True, which="both", alpha=0.3)
     axes[1].legend()
 
+    for ax in axes:
+        ax.set_xscale("log")
+
     fig.suptitle("Baffled Piston Validation")
     fig.tight_layout()
 

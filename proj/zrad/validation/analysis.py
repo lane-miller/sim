@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from analytical import zrad_norm_analytical
-from mesh import DEFAULT_RESULT_SUFFIX, KA_VALUES
 
-DEFAULT_OUT_SUFFIX = DEFAULT_RESULT_SUFFIX
+KA_VALUES = [0.05, 0.1, 0.5, 1.0, 5.0]
+DEFAULT_OUT_SUFFIX = "_ff_pistref"
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 PLOT_FILE = os.path.join(RESULTS_DIR, "validation_plot.png")
@@ -114,6 +114,9 @@ def make_plot(bem_results, plot_file=PLOT_FILE):
     axes[1].set_xlabel(r"$ka$")
     axes[1].grid(True, which="both", alpha=0.3)
     axes[1].legend()
+
+    for ax in axes:
+        ax.set_xscale("log")
 
     fig.suptitle("Baffled piston: BEM vs analytical radiation impedance")
     fig.tight_layout()

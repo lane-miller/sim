@@ -177,6 +177,7 @@ def _far_field_radiated_power(
     far_field_R=None,
     far_field_surfaces="all",
     grid=None,
+    a=None,
 ):
     """Integrate |p|^2/(2 rho c) over a full extraction sphere → W and front-hem ratio."""
     center = _piston_center()
@@ -212,7 +213,8 @@ def _far_field_radiated_power(
     power_front = float(np.sum(power_density[front_mask] * d_omega))
     front_ratio = power_front / power_total if power_total > 0.0 else float("nan")
 
-    z_rad_norm_real_ff = 2.0 * power_total / (U0 ** 2 * A_PISTON * RHO * C)
+    a_piston = A_PISTON if a is None else np.pi * a ** 2
+    z_rad_norm_real_ff = 2.0 * power_total / (U0 ** 2 * a_piston * RHO * C)
 
     return {
         "far_field_R_m": float(radius),
@@ -269,6 +271,8 @@ def solve_one(
     device="auto",
     far_field_R=None,
     far_field_surfaces="all",
+    a=None,
+    L_baffle_m=None,
 ):
     """Load mesh, solve exterior Neumann Burton-Miller BEM, return Z_rad_norm."""
     if mesh_file is None:
@@ -277,8 +281,9 @@ def solve_one(
     if not os.path.isfile(mesh_file):
         raise FileNotFoundError(f"Mesh not found: {mesh_file}. Run mesh.py first.")
 
-    k = ka / A
-    freq = frequency_hz(ka)
+    a_eff = A if a is None else a
+    k = ka / a_eff
+    freq = k * C / (2.0 * np.pi)
     wavelength = 2.0 * np.pi / k
 
     _log(f"ka={ka:g}  f={freq:.1f} Hz  k={k:.4g}  λ={wavelength:.3f} m")
@@ -372,7 +377,7 @@ def solve_one(
     z_rad_norm = np.conj(z_rad / (RHO * C))
 
     kd_label = KD_MARGIN_DEFAULT if kd is None else kd
-    L_baffle = baffle_half_width(ka, kd=kd)
+    L_baffle = baffle_half_width(ka, kd=kd) if L_baffle_m is None else L_baffle_m
     ff_radius = _far_field_radius(wavelength, L_baffle, far_field_R=far_field_R)
     _log(
         f"  far-field power extraction (kd={kd_label:g},"
@@ -392,6 +397,7 @@ def solve_one(
         far_field_R=far_field_R,
         far_field_surfaces=far_field_surfaces,
         grid=grid,
+        a=a_eff,
     )
     dt_ff = time.perf_counter() - t_ff
     _log(f"  far-field done ({dt_ff:.1f} s)")
@@ -400,10 +406,14 @@ def solve_one(
     _log(f"  post-process ({dt_post:.1f} s)")
 
     z_analytical = zrad_norm_analytical(ka)
+    a_piston = np.pi * a_eff ** 2
+    area_piston_bem = float(np.sum(area_piston))
+    area_piston_analytic = float(a_piston)
 
     result = {
         "ka": ka,
         "kd": kd_label,
+        "a_m": a_eff,
         "f_hz": freq,
         "k": k,
         "L_baffle_m": L_baffle,
@@ -411,6 +421,9 @@ def solve_one(
         "n_elements": int(n_elements),
         "n_dofs": int(n_dofs),
         "n_piston_elements": int(np.sum(piston_mask)),
+        "piston_area_m2": area_piston_bem,
+        "piston_area_analytic_m2": area_piston_analytic,
+        "piston_area_ratio": area_piston_bem / area_piston_analytic,
         "device_interface": device,
         "solver": solver,
         "alpha_mode": alpha_mode,

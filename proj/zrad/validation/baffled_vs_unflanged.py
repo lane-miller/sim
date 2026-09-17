@@ -42,6 +42,9 @@ def make_plot(plot_file=PLOT_FILE):
     axes[1].grid(True, which="both", alpha=0.3)
     axes[1].legend()
 
+    for ax in axes:
+        ax.set_xscale("log")
+
     fig.suptitle("Baffled vs. Unflanged Circular Piston: Radiation Impedance")
     fig.tight_layout()
 

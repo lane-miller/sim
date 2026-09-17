@@ -23,3 +23,11 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+
+# Generated meshes, results, plots
+proj/zrad/**/meshes/
+proj/zrad/**/results/
+*.msh
+*.png
+*.json
