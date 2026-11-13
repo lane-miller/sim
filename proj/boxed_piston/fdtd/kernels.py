@@ -89,11 +89,12 @@ def update_v(
 ) -> None:
     """Advance staggered velocity one half step: ``v^{n+½} = v^{n-½} - cv · ∂p^n``.
 
-    Linearised Euler on interior faces only. Outer domain faces ``vx[0]``,
-    ``vx[nx]``, ``vy[0]``, ``vy[ny]``, ``vz[0]``, ``vz[nz]`` are left unchanged
-    (rigid ``v_n = 0``). CPML face regions are handled in ``cpml.py``.
+    Linearised Euler on all faces except the outer rigid boundaries
+    (``vx[0]``, ``vx[nx]``, etc.). CPML slab cells use the same plain
+    derivatives here; :mod:`fdtd.cpml` adds convolutional corrections in slabs.
 
-    Index ranges ``[i_lo, i_hi)`` etc. match ``CpmlSlabs.i_inner`` (cell centres).
+    Index ranges ``[i_lo, i_hi)`` span pressure cell indices (typically the
+    full domain ``0 … nx``).
     """
     nx = p.shape[0]
     ny = p.shape[1]
@@ -151,8 +152,9 @@ def update_p(
 ) -> None:
     """Advance pressure one step: ``p^{n+1} = p^n - cp · div v^{n+½}``.
 
-    ``div v`` is the centred difference from face velocities. Interior cell
-    centres only; CPML slabs are updated separately in ``cpml.py``.
+    ``div v`` is the centred difference from face velocities on all cell
+    centres in the index range; CPML convolutional corrections are applied
+    in ``cpml.py`` after this update.
     """
     i0 = i_lo
     i1 = i_hi
@@ -263,31 +265,33 @@ def update_p_numpy(
                 p[i, j, k] -= cp * div_v
 
 
-def _slab_args(slabs: CpmlSlabs) -> tuple[int, int, int, int, int, int]:
-    return (
-        slabs.i_inner.lo,
-        slabs.i_inner.hi,
-        slabs.j_inner.lo,
-        slabs.j_inner.hi,
-        slabs.k_inner.lo,
-        slabs.k_inner.hi,
-    )
+def _domain_args(
+    p: np.ndarray,
+) -> tuple[int, int, int, int, int, int]:
+    """Full-domain cell-centre index ranges for plain Yee updates."""
+    nx, ny, nz = p.shape
+    return 0, nx, 0, ny, 0, nz
 
 
-def step(fields: Fields, coeffs: UpdateCoeffs, slabs: CpmlSlabs) -> None:
-    """One FDTD leapfrog sub-step on interior cells only.
+def step(
+    fields: Fields,
+    coeffs: UpdateCoeffs,
+    slabs: CpmlSlabs,
+    cpml: object | None = None,
+) -> None:
+    """One FDTD leapfrog sub-step on the full grid (CPML slabs use plain derivatives).
 
     Time staggering (brief §2): pressure *p* is at integer time indices *n*,
     velocity *v* at half steps *n+½*. One call does
 
     1. ``update_v`` — advance ``v^{n-½} → v^{n+½}`` using ``p^n``
-    2. ``update_p`` — advance ``p^n → p^{n+1}`` using ``v^{n+½}``
+    2. optional ``cpml.apply_v`` — convolutional corrections in CPML slabs
+    3. ``update_p`` — advance ``p^n → p^{n+1}`` using ``v^{n+½}``
+    4. optional ``cpml.apply_p`` — CPML corrections on pressure update
 
-    CPML auxiliary updates and ψ memory terms are **not** applied here; call
-    the CPML slab kernels from ``cpml.py`` after each of these stages when wired
-    into the main loop.
+    Pass ``cpml=None`` (default) to skip absorber corrections.
     """
-    i_lo, i_hi, j_lo, j_hi, k_lo, k_hi = _slab_args(slabs)
+    i_lo, i_hi, j_lo, j_hi, k_lo, k_hi = _domain_args(fields.p)
     zero_rigid_face_velocities(fields.vx, fields.vy, fields.vz)
     update_v(
         fields.p,
@@ -302,8 +306,11 @@ def step(fields: Fields, coeffs: UpdateCoeffs, slabs: CpmlSlabs) -> None:
         k_lo,
         k_hi,
     )
+    if cpml is not None:
+        from fdtd.cpml import apply_v as cpml_apply_v
+
+        cpml_apply_v(fields, cpml, coeffs)
     zero_rigid_face_velocities(fields.vx, fields.vy, fields.vz)
-    # hook: cpml.apply_v(fields, slabs, coeffs)
     update_p(
         fields.p,
         fields.vx,
@@ -317,7 +324,10 @@ def step(fields: Fields, coeffs: UpdateCoeffs, slabs: CpmlSlabs) -> None:
         k_lo,
         k_hi,
     )
-    # hook: cpml.apply_p(fields, slabs, coeffs)
+    if cpml is not None:
+        from fdtd.cpml import apply_p as cpml_apply_p
+
+        cpml_apply_p(fields, cpml, coeffs)
 
 
 def step_numpy(
@@ -327,10 +337,22 @@ def step_numpy(
     vz: np.ndarray,
     coeffs: UpdateCoeffs,
     slabs: CpmlSlabs,
+    fields: Fields | None = None,
+    cpml: object | None = None,
 ) -> None:
     """Reference leapfrog step (same order as :func:`step`)."""
-    i_lo, i_hi, j_lo, j_hi, k_lo, k_hi = _slab_args(slabs)
+    i_lo, i_hi, j_lo, j_hi, k_lo, k_hi = _domain_args(p)
     zero_rigid_face_velocities(vx, vy, vz)
     update_v_numpy(p, vx, vy, vz, coeffs.cv, i_lo, i_hi, j_lo, j_hi, k_lo, k_hi)
+    if cpml is not None:
+        if fields is None:
+            raise ValueError("fields required when cpml is set for step_numpy")
+        from fdtd.cpml import apply_v_numpy as cpml_apply_v_numpy
+
+        cpml_apply_v_numpy(p, vx, vy, vz, fields, coeffs, cpml)
     zero_rigid_face_velocities(vx, vy, vz)
     update_p_numpy(p, vx, vy, vz, coeffs.cp, i_lo, i_hi, j_lo, j_hi, k_lo, k_hi)
+    if cpml is not None:
+        from fdtd.cpml import apply_p_numpy as cpml_apply_p_numpy
+
+        cpml_apply_p_numpy(p, vx, vy, vz, fields, coeffs, cpml)

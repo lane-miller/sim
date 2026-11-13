@@ -51,6 +51,9 @@ class Numerics:
     gap_cells: int | None = None
     cpml_cells: int = DEFAULT_CPML_CELLS
     cpml_alpha_factor: float = 1.0
+    cpml_m: float = 3.0
+    cpml_R: float = 1e-6
+    cpml_kappa_max: float = 1.0
     cell_budget: int = 60_000_000
     pulse_db: float = -40.0
     pulse_f_factor: float = 1.2
