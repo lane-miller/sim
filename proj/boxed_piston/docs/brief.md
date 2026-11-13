@@ -85,13 +85,14 @@ A config-driven solver that computes, for **one physical system per run**:
   | `validation/` | Check scripts (`c01_perf.py` … `c10_power.py`) |
 
 ## 4. Local compute envelope
-The M1 has 8 GB. These are estimates, to be confirmed in C1-perf.
+Measured in C1-perf at ~375 M cell-updates/s, ~3.4 box transits, without surface recording. Thread scaling is ~3.2× on 8 threads (memory-bandwidth bound).
 
-| Box | f_max at 20 points/λ | Cells | Run time with Numba |
-|---|---|---|---|
-| ≤ 200 mm | 20 kHz | ≲ 6×10⁷ | ~10–60 min |
-| 300 mm | ~17 kHz | ~6×10⁷ | ~1 h |
-| larger | lower f_max locally, or a Kaggle GPU via a future CuPy backend | — | — |
+| Box | f_max at 20 points/λ | Cells | Est. RAM | Projected run time (C1-perf, Numba, M1) |
+|---|---|---|---|---|
+| 200 mm | 20 kHz | 1.9×10⁷ | 0.37 GB | ~70 s |
+| 300 mm | 17 kHz | 3.7×10⁷ | 0.68 GB | ~3 min |
+| 300 mm | 20 kHz | 5.8×10⁷ | 1.04 GB | ~5 min |
+| ~500 mm | 20 kHz | ~2.6×10⁸ | ~5 GB (RAM limit) | ~25 min (extrapolated) |
 
 ## 5. Checks (in run order, gated)
 **Principle:** build only the code each check needs, and run the checks most likely to kill the approach first. If a check fails its gate, stop and replan before writing more code.
