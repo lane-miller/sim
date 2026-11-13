@@ -13,7 +13,7 @@ A config-driven solver that computes, for **one physical system per run**:
 **Purpose:** coupling to acs-lpm, as the radiation load and directivity for lumped-parameter models.
 
 **Conventions:**
-- Time convention e^{+jωt}. NumPy FFT results are conjugated.
+- Time convention e^{+jωt}. NumPy's forward FFT, P(ω) = Σ p(t)·e^{−jωt}, is already consistent with it, so no conjugation is needed for FDTD data. Conjugate only data imported from e^{−iωt} codes (e.g. bempp in C9).
 - z = ∫_radiator p dS / (ρc·S·v), the dimensionless impedance (acoustic Z_A normalised by ρc/S).
 - The origin is at the radiator centre, with +z the outward face normal.
 - SI units throughout. Air defaults: c = 343 m/s, ρ = 1.204 kg/m³. Both are configurable.
@@ -149,5 +149,5 @@ Days 1–3 are the critical path. If they slip, reduce the scope of C9; don't sk
 - Fillets, recessed or domed radiators, multiple radiators, and non-uniform velocity.
 
 ## 8. Open questions
-- Is the dispersion error at 20 points per wavelength acceptable at the top of each run's band? C2-dispersion and C8-convergence decide.
+- Dispersion (C2-dispersion, PASS): solver matches exact Yee dispersion (mean lag within 5%). At ppw 20 the worst-direction (axis) phase lag is ≈1°/λ, giving ≈35–42° over a 600 mm path at 20 kHz; ≤10° needs ppw ≈ 35–38 (~10–13× cost). Decision deferred to C8-convergence, which measures the actual directivity error on a box at h and h/2.
 - acs-lpm interface needs (frequency grid, angle grid, phase reference): to be specified once single runs are verified.
