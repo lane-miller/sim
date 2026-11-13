@@ -12,6 +12,7 @@ from analytical import zrad_norm_analytical
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 OUT_SUFFIX = "_ff_top"
 PLOT_FILE = os.path.join(RESULTS_DIR, "validation_plot_dense.png")
+PLOT_FILE_BW = os.path.join(RESULTS_DIR, "validation_plot_dense_bw.png")
 
 # Dense sweep ka grid (geomspace 0.05–5, 12 points) — duplicated here to avoid gmsh import.
 KA_VALUES_DENSE = list(np.geomspace(0.05, 5.0, 12))
@@ -80,6 +81,62 @@ def print_comparison_table(bem_results):
     return max_re_err, max_im_err
 
 
+def _style_axes_bw(ax):
+    """Match deck B&W convention: white background, bottom/left spines only."""
+    ax.set_facecolor("white")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def make_plot_bw(bem_results, plot_file=PLOT_FILE_BW):
+    """B&W slide plot: linear ka, hollow BEM markers on solid analytical curve."""
+    ka_bem = np.array([r["ka"] for r in bem_results])
+    re_bem = np.array([r["Z_rad_norm_real_ff"] for r in bem_results])
+    im_bem = np.array([r["Z_rad_norm_imag"] for r in bem_results])
+
+    ka_hi = ka_bem.max()
+    ka_dense = np.linspace(0.0, ka_hi, 300)
+    z_ana = zrad_norm_analytical(ka_dense)
+
+    hollow_kw = dict(
+        color="k",
+        markerfacecolor="white",
+        markeredgecolor="k",
+        markeredgewidth=1.2,
+        linestyle="none",
+        markersize=6,
+        zorder=3,
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharex=True)
+    fig.patch.set_facecolor("white")
+
+    axes[0].plot(ka_dense, np.real(z_ana), "k-", linewidth=2, label="Analytical", zorder=2)
+    axes[0].plot(ka_bem, re_bem, marker="s", label="BEM", **hollow_kw)
+    axes[0].set_ylabel(r"Re{$Z_\mathrm{rad}/(\rho c)$}")
+    axes[0].set_title("Radiation Resistance")
+    axes[0].set_xlabel(r"$ka$")
+    axes[0].set_xlim(0.0, ka_hi)
+    axes[0].legend(frameon=False)
+    _style_axes_bw(axes[0])
+
+    axes[1].plot(ka_dense, np.imag(z_ana), "k-", linewidth=2, label="Analytical", zorder=2)
+    axes[1].plot(ka_bem, im_bem, marker="o", label="BEM", **hollow_kw)
+    axes[1].set_ylabel(r"Im{$Z_\mathrm{rad}/(\rho c)$}")
+    axes[1].set_title("Radiation Reactance")
+    axes[1].set_xlabel(r"$ka$")
+    axes[1].set_xlim(0.0, ka_hi)
+    axes[1].legend(frameon=False)
+    _style_axes_bw(axes[1])
+
+    fig.tight_layout()
+
+    os.makedirs(os.path.dirname(plot_file), exist_ok=True)
+    fig.savefig(plot_file, dpi=150, facecolor="white")
+    plt.close(fig)
+    print(f"\nPlot saved: {plot_file}")
+
+
 def make_plot(bem_results, plot_file=PLOT_FILE):
     """Plot adopted BEM markers (FF top Re, NF Im) on the analytical curve."""
     ka_bem = np.array([r["ka"] for r in bem_results])
@@ -136,8 +193,13 @@ def main():
     parser.add_argument(
         "--plot",
         type=str,
-        default=PLOT_FILE,
-        help="Output path for dense validation plot",
+        default=None,
+        help="Output path for dense validation plot (default: color or B&W)",
+    )
+    parser.add_argument(
+        "--bw",
+        action="store_true",
+        help="Emit black-and-white slide plot (validation_plot_dense_bw.png)",
     )
     parser.add_argument(
         "--out-suffix",
@@ -149,7 +211,10 @@ def main():
 
     bem_results = load_bem_results(args.results_dir, out_suffix=args.out_suffix)
     print_comparison_table(bem_results)
-    make_plot(bem_results, plot_file=args.plot)
+    if args.bw:
+        make_plot_bw(bem_results, plot_file=args.plot or PLOT_FILE_BW)
+    else:
+        make_plot(bem_results, plot_file=args.plot or PLOT_FILE)
 
 
 if __name__ == "__main__":

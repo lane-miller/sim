@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.collections import PolyCollection
 from matplotlib.colors import Normalize
-from matplotlib import cm
+import matplotlib.cm as cm
 
 from mesh import BAFFLE_TAG, C, PISTON_TAG, RHO, U0
 from solve import (
@@ -64,7 +64,8 @@ def _top_surface_triangles(grid):
     elems = np.asarray(grid.elements)
     mask = _top_surface_mask(grid)
     elem_idx = np.where(mask)[0]
-    triangles = verts[:2, elems[:, elem_idx]].transpose(2, 0, 1)
+    tri_xy = verts[:2, elems[:, elem_idx]]  # (2, 3, n_top)
+    triangles = tri_xy.transpose(2, 1, 0)  # (n_top, 3, 2) for PolyCollection
     return triangles, elem_idx
 
 
@@ -198,7 +199,7 @@ def plot_pressure_heatmap(triangles, p_mag_norm, xlim, ylim, out_path):
 
     # Compact colorbar to the right of the mesh.
     cax = fig.add_axes([0.88, 0.22, 0.035, 0.56])
-    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cb = fig.colorbar(sm, cax=cax)
     cb.ax.tick_params(labelsize=8, length=2, width=0.6, pad=1)
