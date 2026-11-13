@@ -31,3 +31,8 @@ proj/zrad/**/results/
 *.msh
 *.png
 *.json
+
+# Boxed Piston
+.pytest_cache/
+proj/boxed_piston/**/*.h5
+proj/boxed_piston/outputs/
