@@ -177,16 +177,33 @@ def _domain_counts(
     return nbx, nby, nbz, nx, ny, nz, rw, rh, rd
 
 
+def estimate_memory_bytes(nx: int, ny: int, nz: int, cpml_cells: int) -> int:
+    """Analytic byte count matching :func:`fdtd.grid.allocate_fields` (for pre-flight).
+
+    Main Yee fields use staggered shapes ``(nx, ny, nz)``, ``(nx+1, ny, nz)``, etc.,
+    not four equal cubes. CPML ``ψ`` arrays are sized to face slabs only; corner cells
+    appear in multiple slab arrays (intentional double-count vs a single union volume).
+    """
+    n_main = (
+        nx * ny * nz
+        + (nx + 1) * ny * nz
+        + nx * (ny + 1) * nz
+        + nx * ny * (nz + 1)
+    )
+    c = cpml_cells
+    n_psi = (
+        2 * c * ny * nz
+        + 2 * nx * c * nz
+        + 2 * nx * ny * c
+        + 2 * (c + 1) * ny * nz
+        + 2 * nx * (c + 1) * nz
+        + 2 * nx * ny * (c + 1)
+    )
+    return 4 * (n_main + n_psi)
+
+
 def _memory_bytes(nx: int, ny: int, nz: int, cpml_cells: int) -> float:
-    """p + three velocity components (float32); ψ only in CPML slabs (6× float32)."""
-    n_total = nx * ny * nz
-    main = 4.0 * 4.0 * n_total
-    ix0, iy0, iz0 = cpml_cells, cpml_cells, cpml_cells
-    ix1, iy1, iz1 = nx - cpml_cells, ny - cpml_cells, nz - cpml_cells
-    n_inner = max(0, ix1 - ix0) * max(0, iy1 - iy0) * max(0, iz1 - iz0)
-    n_cpml = n_total - n_inner
-    psi = 6.0 * 4.0 * n_cpml
-    return main + psi
+    return float(estimate_memory_bytes(nx, ny, nz, cpml_cells))
 
 
 def derive(cfg: Config) -> Derived:
@@ -207,8 +224,8 @@ def derive(cfg: Config) -> Derived:
       zero box cells; at least one cell per axis).
     * **CPML α** — ``cpml_alpha_factor · π · f_min``.
     * **Gap** — ``gap_cells`` (default 2) times ``h``.
-    * **Memory** — four float32 field arrays over the full grid, plus six float32 ψ
-      arrays counted only in CPML cells (slab union approximation).
+    * **Memory** — staggered float32 ``p``/``v`` arrays plus CPML ``ψ`` face slabs
+      (see :func:`estimate_memory_bytes`).
     * **Gaussian pulse** — ``σ`` such that ``|V(f)|`` is ``pulse_db`` at
       ``pulse_f_factor·f_max``:
       ``σ = sqrt(2·ln(10^(-pulse_db/20))) / (2π·pulse_f_factor·f_max)``;
