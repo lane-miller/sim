@@ -48,6 +48,7 @@ class Band:
 @dataclass
 class Numerics:
     ppw: float = 20.0
+    h_override: float | None = None  # fixed *h* (validation sweeps); skips ppw/radiator cap
     cells_across_radiator: int = 10
     cfl_safety: float = 0.99
     gap_cells: int | None = None
@@ -247,9 +248,9 @@ def derive(cfg: Config) -> Derived:
     * **f_max** — ``band.f_max`` if set, else ``min(20 kHz, f at ka=10)`` with
       ``f_ka10 = 10·c/(π·D)`` and ``D`` the smallest radiator dimension.
     * **λ_min** — ``c / f_max``.
-    * **h** — ``min(λ_min/ppw, D/cells_across_radiator)``. If the resulting
-      domain cell count exceeds ``cell_budget``, keep ``h = λ_min/ppw`` and set
-      ``zrad_fallback`` (analytic Z_rad path in later stages).
+    * **h** — ``numerics.h_override`` if set; else ``min(λ_min/ppw, D/cells_across_radiator)``.
+      If the resulting domain cell count exceeds ``cell_budget``, keep ``h = λ_min/ppw``
+      (or the override) and set ``zrad_fallback`` (analytic Z_rad path in later stages).
     * **Δt** — ``cfl_safety · h / (c·√3)`` (3-D CFL).
     * **Realized box** — each side rounded to an integer number of cells at ``h``.
     * **Radiator center in cells** — ``round(x_c/h)``, ``round(y_c/h)`` on the front face.
@@ -275,10 +276,6 @@ def derive(cfg: Config) -> Derived:
     lambda_min = c / f_max
 
     D = _radiator_D(cfg.radiator)
-    h_from_ppw = lambda_min / num.ppw
-    h_from_radiator = D / num.cells_across_radiator
-    h_try = min(h_from_ppw, h_from_radiator)
-
     if cfg.geometry == "baffle":
         count_fn = lambda hh: _baffle_domain_counts(  # noqa: E731
             cfg.radiator, hh, gap_cells, num.cpml_cells
@@ -286,13 +283,22 @@ def derive(cfg: Config) -> Derived:
     else:
         count_fn = lambda hh: _domain_counts(cfg.box, hh, gap_cells, num.cpml_cells)  # noqa: E731
 
-    nbx, nby, nbz, nx, ny, nz, _, _, _ = count_fn(h_try)
     zrad_fallback = False
-    if nx * ny * nz > num.cell_budget:
-        h = h_from_ppw
-        zrad_fallback = True
+    if num.h_override is not None:
+        h = float(num.h_override)
+        nbx, nby, nbz, nx, ny, nz, _, _, _ = count_fn(h)
+        if nx * ny * nz > num.cell_budget:
+            zrad_fallback = True
     else:
-        h = h_try
+        h_from_ppw = lambda_min / num.ppw
+        h_from_radiator = D / num.cells_across_radiator
+        h_try = min(h_from_ppw, h_from_radiator)
+        nbx, nby, nbz, nx, ny, nz, _, _, _ = count_fn(h_try)
+        if nx * ny * nz > num.cell_budget:
+            h = h_from_ppw
+            zrad_fallback = True
+        else:
+            h = h_try
 
     nbx, nby, nbz, nx, ny, nz, rw, rh, rd = count_fn(h)
     total_cells = nx * ny * nz
@@ -432,6 +438,11 @@ def validate(
     if num.cpml_cells < DEFAULT_CPML_CELLS:
         warnings.append(
             f"cpml_cells={num.cpml_cells} below default {DEFAULT_CPML_CELLS}"
+        )
+
+    if num.h_override is not None:
+        warnings.append(
+            f"h_override={num.h_override:.6g} m active (intended for validation sweeps)"
         )
 
     return errors, warnings

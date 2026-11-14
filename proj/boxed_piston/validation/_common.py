@@ -7,9 +7,11 @@ import sys
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
+
+_RunKey = TypeVar("_RunKey")
 
 from fdtd.config import DEFAULT_RAM_LIMIT_BYTES, Config, SQRT3, estimate_memory_bytes
 from fdtd.grid import Grid
@@ -545,6 +547,132 @@ def min_echo_time_s(
         for pt in points
     ]
     return min(times)
+
+
+def design_band_mask(
+    freqs: np.ndarray,
+    *,
+    f_min: float,
+    f_max: float,
+    z: np.ndarray | None = None,
+) -> np.ndarray:
+    """Design band ``[f_min, f_max]``; optional ``np.isfinite(z)`` for Z gates."""
+    m = (freqs >= f_min) & (freqs <= f_max)
+    if z is not None:
+        m &= np.isfinite(z)
+    return m
+
+
+def interp_vs_ka(
+    ka_tgt: np.ndarray,
+    ka_src: np.ndarray,
+    z_src: np.ndarray,
+) -> np.ndarray:
+    """Interpolate complex ``z_src(ka_src)`` onto ``ka_tgt`` (sorted by ``ka``)."""
+    if ka_tgt.size == 0:
+        return np.asarray([], dtype=np.complex128)
+    order = np.argsort(ka_src)
+    ks = ka_src[order]
+    zs = z_src[order]
+    re = np.interp(ka_tgt, ks, np.real(zs))
+    im = np.interp(ka_tgt, ks, np.imag(zs))
+    return re + 1j * im
+
+
+def interp_vs_ka_real(
+    ka_tgt: float,
+    ka_src: np.ndarray,
+    y_src: np.ndarray,
+) -> float:
+    """Scalar linear interp of real ``y_src`` at ``ka_tgt``."""
+    if ka_src.size == 0:
+        return float("nan")
+    order = np.argsort(ka_src)
+    return float(np.interp(ka_tgt, ka_src[order], y_src[order]))
+
+
+def runs_on_common_ka(
+    runs: dict[_RunKey, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    *,
+    ref_key: _RunKey,
+    label: str,
+    a_by_key: dict[_RunKey, float] | None = None,
+    restrict_to_band: bool = False,
+    key_label: str = "key",
+) -> tuple[np.ndarray, dict[_RunKey, np.ndarray], dict[str, Any]]:
+    """Interpolate runs onto reference ``ka`` where all runs overlap.
+
+    Each run value is ``(ka, z, band)`` with ``band`` the design band mask on that
+    run's frequency grid. If ``restrict_to_band`` is True (C8 gates), overlap uses
+    only ``band & isfinite(z)``; otherwise only finite ``z`` (C7 legacy G3 alignment).
+    """
+    print(f"  [{label}] common-ka alignment:", flush=True)
+    valid: dict[_RunKey, tuple[np.ndarray, np.ndarray]] = {}
+    spans: list[tuple[float, float]] = []
+    meta_runs: dict[str, Any] = {}
+    a_by_key = a_by_key or {}
+    for key in sorted(runs):
+        ka, z, band = runs[key]
+        ka = np.asarray(ka, dtype=np.float64)
+        z = np.asarray(z, dtype=np.complex128)
+        band = np.asarray(band, dtype=bool)
+        m_fin = (band & np.isfinite(z)) if restrict_to_band else np.isfinite(z)
+        n_fin = int(np.sum(m_fin))
+        n_band = int(np.sum(band & np.isfinite(z)))
+        a_m = float(a_by_key.get(key, float("nan")))
+        if n_fin == 0:
+            raise RuntimeError(f"{label}: run {key_label}={key!r} has no samples")
+        ka_fin = ka[m_fin]
+        ka_span = (float(np.min(ka_fin)), float(np.max(ka_fin)))
+        meta_runs[str(key)] = {
+            "n_finite": n_fin,
+            "n_band_mask": n_band,
+            "ka_min": ka_span[0],
+            "ka_max": ka_span[1],
+            "a_m": a_m,
+            "restrict_to_band": restrict_to_band,
+        }
+        print(
+            f"    {key_label}={key!r}: samples={n_fin}  "
+            f"(design-band∩finite={n_band})  "
+            f"ka∈[{ka_span[0]:.4g}, {ka_span[1]:.4g}]"
+            + (f"  a={a_m:.6g} m" if math.isfinite(a_m) else ""),
+            flush=True,
+        )
+        valid[key] = (ka_fin, z[m_fin])
+        spans.append(ka_span)
+
+    ka_min = max(s[0] for s in spans)
+    ka_max = min(s[1] for s in spans)
+    print(
+        f"    overlap ka ∈ [{ka_min:.4g}, {ka_max:.4g}]  (ref {key_label}={ref_key!r})",
+        flush=True,
+    )
+    if ka_min >= ka_max - 1e-12:
+        raise RuntimeError(
+            f"{label}: empty ka overlap [{ka_min:.4g}, {ka_max:.4g}] across runs"
+        )
+
+    if ref_key not in valid:
+        raise RuntimeError(f"{label}: reference {key_label}={ref_key!r} missing")
+    ka_u, z_u = valid[ref_key]
+    m_grid = (ka_u >= ka_min) & (ka_u <= ka_max)
+    if not np.any(m_grid):
+        raise RuntimeError(f"{label}: reference run has no ka inside overlap")
+    ka_grid = ka_u[m_grid]
+    aligned: dict[_RunKey, np.ndarray] = {ref_key: z_u[m_grid]}
+    for key, (ka_v, z_v) in valid.items():
+        if key == ref_key:
+            continue
+        aligned[key] = interp_vs_ka(ka_grid, ka_v, z_v)
+    meta: dict[str, Any] = {
+        "runs": meta_runs,
+        "ka_overlap": [ka_min, ka_max],
+        "n_ka_common": int(ka_grid.size),
+        "ref_key": ref_key,
+        "restrict_to_band": restrict_to_band,
+    }
+    return ka_grid, aligned, meta
 
 
 def print_runtime_summary(run_timer: RunTimer, phases: tuple[str, ...]) -> None:

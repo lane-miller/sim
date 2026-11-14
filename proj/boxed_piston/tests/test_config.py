@@ -141,6 +141,22 @@ def test_box_mode_derive_unchanged_smoke():
     assert d.cpml_sides == CPML_SIDES_ALL
 
 
+def test_h_override_sets_spacing_and_ppw_realized():
+    cfg = _base_cfg(
+        box=Box(W=0.2, H=0.2, D=0.2),
+        band=Band(f_min=50.0, f_max=3000.0),
+        numerics=Numerics(h_override=0.2 / 36.0, ppw=999.0),
+    )
+    d = derive(cfg)
+    assert d.h == pytest.approx(0.2 / 36.0, rel=1e-12)
+    assert d.realized_W == pytest.approx(0.2, abs=1e-9)
+    assert d.realized_H == pytest.approx(0.2, abs=1e-9)
+    assert d.realized_D == pytest.approx(0.2, abs=1e-9)
+    assert d.ppw_realized == pytest.approx(d.lambda_min / d.h, rel=1e-9)
+    _, warnings = validate(cfg, d)
+    assert any("h_override" in w for w in warnings)
+
+
 def test_default_json_matches_config_defaults():
     loaded = Config.from_json((CONFIGS / "default.json").read_text(encoding="utf-8"))
     assert loaded.to_dict() == Config().to_dict()

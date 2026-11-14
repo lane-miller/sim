@@ -98,95 +98,6 @@ def _check_ram(label: str, d: object, ram_limit: float) -> None:
     )
 
 
-def _interp_vs_ka(ka_tgt: np.ndarray, ka_src: np.ndarray, z_src: np.ndarray) -> np.ndarray:
-    if ka_tgt.size == 0:
-        return np.asarray([], dtype=np.complex128)
-    order = np.argsort(ka_src)
-    ks = ka_src[order]
-    zs = z_src[order]
-    re = np.interp(ka_tgt, ks, np.real(zs))
-    im = np.interp(ka_tgt, ks, np.imag(zs))
-    return re + 1j * im
-
-
-def _runs_on_common_ka(
-    runs: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]],
-    *,
-    ref_key: int,
-    label: str,
-    a_by_key: dict[int, float],
-) -> tuple[np.ndarray, dict[int, np.ndarray], dict[str, Any]]:
-    """Interpolate runs onto the reference run's ``ka`` where all runs overlap.
-
-    Per-run span uses only finite ``z`` (``band`` is diagnostic, not applied).
-    Overlap: ``[max(ka_min), min(ka_max)]`` over those finite samples.
-    """
-    print(f"  [{label}] common-ka alignment:", flush=True)
-    valid: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-    spans: list[tuple[float, float]] = []
-    meta_runs: dict[str, Any] = {}
-    for key in sorted(runs):
-        ka, z, band = runs[key]
-        ka = np.asarray(ka, dtype=np.float64)
-        z = np.asarray(z, dtype=np.complex128)
-        m_fin = np.isfinite(z)
-        n_fin = int(np.sum(m_fin))
-        n_band = int(np.sum(band & m_fin))
-        a_m = float(a_by_key.get(key, float("nan")))
-        if n_fin == 0:
-            raise RuntimeError(f"C7 {label}: run cells={key} has no finite z")
-        ka_fin = ka[m_fin]
-        ka_span = (float(np.min(ka_fin)), float(np.max(ka_fin)))
-        meta_runs[str(key)] = {
-            "n_finite": n_fin,
-            "n_band_mask": n_band,
-            "ka_min": ka_span[0],
-            "ka_max": ka_span[1],
-            "a_m": a_m,
-        }
-        print(
-            f"    cells={key}: finite={n_fin}  "
-            f"(band∩finite={n_band})  "
-            f"ka∈[{ka_span[0]:.4g}, {ka_span[1]:.4g}]  a={a_m:.6g} m",
-            flush=True,
-        )
-        valid[key] = (ka_fin, z[m_fin])
-        spans.append(ka_span)
-
-    ka_min = max(s[0] for s in spans)
-    ka_max = min(s[1] for s in spans)
-    print(
-        f"    overlap ka ∈ [{ka_min:.4g}, {ka_max:.4g}]  (ref cells={ref_key})",
-        flush=True,
-    )
-    if ka_min >= ka_max - 1e-12:
-        raise RuntimeError(
-            f"C7 {label}: empty ka overlap [{ka_min:.4g}, {ka_max:.4g}] across runs"
-        )
-
-    if ref_key not in valid:
-        raise RuntimeError(f"C7 {label}: reference key {ref_key} missing")
-    ka_u, z_u = valid[ref_key]
-    m_grid = (ka_u >= ka_min) & (ka_u <= ka_max)
-    if not np.any(m_grid):
-        raise RuntimeError(
-            f"C7 {label}: reference run has no finite ka inside overlap"
-        )
-    ka_grid = ka_u[m_grid]
-    aligned: dict[int, np.ndarray] = {ref_key: z_u[m_grid]}
-    for key, (ka_v, z_v) in valid.items():
-        if key == ref_key:
-            continue
-        aligned[key] = _interp_vs_ka(ka_grid, ka_v, z_v)
-    meta: dict[str, Any] = {
-        "runs": meta_runs,
-        "ka_overlap": [ka_min, ka_max],
-        "n_ka_common": int(ka_grid.size),
-        "ref_key": ref_key,
-    }
-    return ka_grid, aligned, meta
-
-
 def _run_fdtd(
     cfg: Config,
     out_path: Path,
@@ -487,11 +398,13 @@ def main(argv: list[str] | None = None) -> int:
 
         _fail_if_duplicate_h(g3_h, "G3 cells_across sweep")
 
-        ka_g3, z_g3_aligned, g3_ka_meta = _runs_on_common_ka(
+        ka_g3, z_g3_aligned, g3_ka_meta = vc.runs_on_common_ka(
             g3_runs,
             ref_key=max(_G3_CELLS),
-            label="G3",
+            label="C7 G3",
             a_by_key=g3_a,
+            restrict_to_band=False,
+            key_label="cells",
         )
         z_ref_g3 = np.asarray(z_baffled_circle(ka_g3), dtype=np.complex128)
         for n_cells in _G3_CELLS:
@@ -592,11 +505,13 @@ def main(argv: list[str] | None = None) -> int:
 
             _fail_if_duplicate_h(rt_h, "racetrack cells_across sweep")
 
-            ka_rt, z_rt_aligned, rt_ka_meta = _runs_on_common_ka(
+            ka_rt, z_rt_aligned, rt_ka_meta = vc.runs_on_common_ka(
                 rt_z,
                 ref_key=24,
-                label="racetrack",
+                label="C7 racetrack",
                 a_by_key=rt_a,
+                restrict_to_band=False,
+                key_label="cells",
             )
             z_ref_rt = z_rt_aligned[24]
             rt_report = {
