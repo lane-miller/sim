@@ -903,7 +903,7 @@ def plan_reference_n(
     echo_margin: float,
     ram_limit: float,
 ) -> tuple[int, float, str]:
-    """Centred reference; grow ``n`` until every union receiver vector fits and clears echo."""
+    """Centered reference; grow ``n`` until every union receiver vector fits and clears echo."""
     h, c = d.h, cfg.air.c
     n_guess = max(grid_n(_baseline(), s), 128)
     if n_guess % 2:

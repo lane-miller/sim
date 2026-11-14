@@ -8,7 +8,7 @@ A config-driven solver that computes, for **one physical system per run**:
 2. **far-field directivity**, complex (required);
 3. **surface pressure on the box**, stored so that near-field and surface probes can be computed later.
 
-**System:** a rigid radiator flush on one face of a rigid rectangular box, with uniform normal velocity on the radiator and v_n = 0 everywhere else. Air is linear and lossless. The radiator is circular by default; the mask also supports rectangles and racetracks.
+**System:** a rigid radiator flush on one face of a rigid rectangular box, with uniform normal velocity on the radiator and v_n = 0 everywhere else. Air is linear and lossless. The radiator is circular by default; the mask also supports rectangles and racetracks. **Radiator geometry (config `radiator`):** `circle` — `dims[0]` is the **diameter**; `rect` — `dims` is **(width, height)**; `racetrack` — `dims` is **(width, height)** with semicircular ends of diameter **min(width, height)** along the longer axis. **`(x_c, y_c)`** is the offset of the radiator center from the **front-face center**. The **front face** is **+z**, size **W×H**; the box interior extends in **−z** behind it (depth **D**).
 
 **Purpose:** coupling to acs-lpm, as the radiation load and directivity for lumped-parameter models.
 
@@ -24,7 +24,7 @@ A config-driven solver that computes, for **one physical system per run**:
 **Derived, not fixed.** Every number below (h, Δt, points per wavelength, cells across the radiator, gap, CPML thickness and α, pulse width, run length, decimation, cell budget) is an illustrative default. The solver computes each one per system from the config (f_min, f_max, box and radiator geometry, tolerances) using the rules in this section. Defaults live in one place, can be overridden in the config, and are written to the output metadata. Check results (§5) update the defaults and the pre-flight thresholds.
 
 - **Scheme:** linear acoustic FDTD on a staggered (Yee) grid, with p at cell centers and v on cell faces. 2nd order in space and time.
-- **Box:** aligned with the grid. It is rigid through v_n = 0 on its faces, so edges and corners are exact. Realised dimensions are rounded to h and reported.
+- **Box:** aligned with the grid. It is rigid through v_n = 0 on its faces, so edges and corners are exact. Realized dimensions are rounded to h and reported.
 - **Grid spacing:** h = min(λ_min/20, D/10), where D is the radiator diameter (the smallest dimension for non-circular masks). This resolves both the waves and the radiator.
 - **Time step:** Δt = h/(c√3), the CFL limit. Example: at 20 kHz, h ≈ 0.858 mm and Δt ≈ 1.44 µs. f_max is set by h, not by Δt.
 - **Radiator:** a prescribed v_n(t) on face cells, weighted by the area fraction each cell has inside the radiator outline, so the volume velocity is exact. The same weights are used to average pressure.

@@ -118,7 +118,7 @@ def apply_h_from_ppw(d: object, cfg: Config, *, f_ref: float, ppw: float) -> Non
     c = cfg.air.c
     h = c / (f_ref * ppw)
     d.h = h
-    d.ppw_realised = ppw
+    d.ppw_realized = ppw
     d.lambda_min = c / f_ref
     att = math.pow(10.0, -cfg.numerics.pulse_db / 20.0)
     d.pulse_sigma = math.sqrt(2.0 * math.log(att)) / (

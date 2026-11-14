@@ -148,7 +148,7 @@ def _apply_h_from_ppw(d: object, cfg: Config, *, f_ref: float, ppw: float) -> No
     c = cfg.air.c
     h = c / (f_ref * ppw)
     d.h = h
-    d.ppw_realised = ppw
+    d.ppw_realized = ppw
     d.lambda_min = c / f_ref
     att = math.pow(10.0, -cfg.numerics.pulse_db / 20.0)
     d.pulse_sigma = math.sqrt(2.0 * math.log(att)) / (
@@ -1353,7 +1353,7 @@ def print_tables(
     print(
         f"  h={d.h * 1e3:.4f} mm (c/({f_ref/1e3:.0f} kHz·{ppw_cli:g} ppw))  "
         f"dt={d.dt * 1e6:.3f} µs  S={cfg.air.c * d.dt / d.h:.3f}  "
-        f"ppw@f_ref={d.ppw_realised:.2f}  grid {d.nx}³ (interior {interior}³)"
+        f"ppw@f_ref={d.ppw_realized:.2f}  grid {d.nx}³ (interior {interior}³)"
     )
 
     print("\n=== Phase lag per λ (longest pair; gate dr/λ ≥ 1) ===")
@@ -1628,7 +1628,7 @@ def main() -> int:
     S = cfg.air.c * d.dt / d.h
     setup_detail = (
         f"grid {n}³ h={d.h * 1e3:.3f} mm Δt={d.dt * 1e6:.2f} µs S={S:.3f} "
-        f"ppw@f_ref={d.ppw_realised:g} pulse t₀={d.pulse_t0 * 1e3:.2f} ms "
+        f"ppw@f_ref={d.ppw_realized:g} pulse t₀={d.pulse_t0 * 1e3:.2f} ms "
         f"receivers={n_rec} steps={n_total:,} est RAM {_fmt_bytes(est_ram)} "
         f"band {f_lo / 1e3:.1f}–{min(f_hi, d.f_max) / 1e3:.1f} kHz "
         f"({geo_label})"
@@ -1761,7 +1761,7 @@ def main() -> int:
             "h_m": d.h,
             "dt_s": d.dt,
             "f_max_hz": d.f_max,
-            "ppw_at_f_ref": d.ppw_realised,
+            "ppw_at_f_ref": d.ppw_realized,
             "n_analysis_steps": n_analysis,
             "n_total_steps": n_total,
         },

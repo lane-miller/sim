@@ -108,9 +108,9 @@ class Derived:
     h: float
     dt: float
     zrad_fallback: bool
-    realised_W: float
-    realised_H: float
-    realised_D: float
+    realized_W: float
+    realized_H: float
+    realized_D: float
     radiator_ic: int
     radiator_jc: int
     box_nx: int
@@ -129,7 +129,7 @@ class Derived:
     pulse_t0: float
     run_time_s: float
     n_steps: int
-    ppw_realised: float
+    ppw_realized: float
 
 
 def _radiator_D(radiator: Radiator) -> float:
@@ -222,7 +222,7 @@ def derive(cfg: Config) -> Derived:
       domain cell count exceeds ``cell_budget``, keep ``h = λ_min/ppw`` and set
       ``zrad_fallback`` (analytic Z_rad path in later stages).
     * **Δt** — ``cfl_safety · h / (c·√3)`` (3-D CFL).
-    * **Realised box** — each side rounded to an integer number of cells at ``h``.
+    * **Realized box** — each side rounded to an integer number of cells at ``h``.
     * **Radiator center in cells** — ``round(x_c/h)``, ``round(y_c/h)`` on the front face.
     * **Domain** — along each axis: ``cpml + gap + box_cells + gap + cpml`` (free-field:
       zero box cells; at least one cell per axis).
@@ -283,7 +283,7 @@ def derive(cfg: Config) -> Derived:
     run_time_s = t0 + 6.0 * sigma + num.n_transits * (max_dim + 2.0 * gap_m) / c
     n_steps = max(1, math.ceil(run_time_s / dt))
 
-    ppw_realised = lambda_min / h
+    ppw_realized = lambda_min / h
 
     return Derived(
         f_max=f_max,
@@ -291,9 +291,9 @@ def derive(cfg: Config) -> Derived:
         h=h,
         dt=dt,
         zrad_fallback=zrad_fallback,
-        realised_W=rw,
-        realised_H=rh,
-        realised_D=rd,
+        realized_W=rw,
+        realized_H=rh,
+        realized_D=rd,
         radiator_ic=radiator_ic,
         radiator_jc=radiator_jc,
         box_nx=nbx,
@@ -312,7 +312,7 @@ def derive(cfg: Config) -> Derived:
         pulse_t0=t0,
         run_time_s=run_time_s,
         n_steps=n_steps,
-        ppw_realised=ppw_realised,
+        ppw_realized=ppw_realized,
     )
 
 
@@ -361,9 +361,9 @@ def validate(
     if derived.zrad_fallback:
         warnings.append("cell-budget fallback active (zrad_source will be analytic)")
 
-    if derived.ppw_realised < num.ppw - 1e-9:
+    if derived.ppw_realized < num.ppw - 1e-9:
         warnings.append(
-            f"realised {derived.ppw_realised:.1f} points per wavelength < "
+            f"realized {derived.ppw_realized:.1f} points per wavelength < "
             f"target ppw={num.ppw}"
         )
 

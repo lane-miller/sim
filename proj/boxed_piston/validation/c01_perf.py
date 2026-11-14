@@ -552,7 +552,7 @@ def build_projections(
             wall_s = d.n_steps * ms * 1e-3
         sim_duration_s = d.n_steps * d.dt
         sim_duration_ms = sim_duration_s * 1e3
-        max_box_m = max(d.realised_W, d.realised_H, d.realised_D)
+        max_box_m = max(d.realized_W, d.realized_H, d.realized_D)
         box_transits = (
             sim_duration_s * cfg.air.c / max_box_m if max_box_m > 0 else None
         )
