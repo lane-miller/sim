@@ -35,7 +35,8 @@ from fdtd.recorder import (  # noqa: E402
     decimation_factor,
     validate_huygens_clearance,
 )
-from fdtd.source import BoxBoundary  # noqa: E402
+from fdtd.source import BoxBoundary, velocity_pulse  # noqa: E402
+from fdtd.run import run  # noqa: E402
 
 _F64 = np.float64
 
@@ -115,6 +116,8 @@ def test_hdf5_structure_shapes_and_finite():
             assert f["radiator/v_pulse_integer"].shape == (n_steps,)
             assert f["radiator/v_pulse_half"].shape == (n_steps,)
             assert f["radiator/p_avg"].shape == (n_steps,)
+            assert f["radiator/times_p"].shape == (n_steps,)
+            assert f["radiator/times_v_half"].shape == (n_steps,)
             nh = f["huygens/p_face"].shape[1]
             nb = f["box_surface/p"].shape[1]
             assert f["huygens/p_face"].shape == (n_dec, nh)
@@ -247,6 +250,8 @@ def test_buffer_sizes_bounded():
         8  # v_int
         + 8  # v_half
         + 8  # p_avg
+        + 8  # rad times_p
+        + 8  # rad times_v_half
         + 8  # h tp
         + 8  # h tvn
         + 8  # b t
@@ -261,3 +266,36 @@ def test_decimation_factor_floor():
     m = decimation_factor(4_000.0, 2e-5)
     expect = max(1, int(math.floor(1.0 / (2.5 * 4_000.0 * 2e-5))))
     assert m == expect
+
+
+def test_recorded_times_match_leapfrog_after_step(monkeypatch):
+    """After step(n), p is at (n+1)Δt and recorded v_half at (n+½)Δt."""
+    n_steps = 12
+    cfg, d, _g, _b = _small_problem(n_steps_override=n_steps)
+    real_derive = derive
+
+    def wrapped(c: Config):
+        out = real_derive(c)
+        out.n_steps = n_steps
+        out.run_time_s = n_steps * out.dt
+        return out
+
+    monkeypatch.setattr("fdtd.run.derive", wrapped)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "times.h5"
+        run(cfg, out_path=path, progress=False)
+        with h5py.File(path, "r") as f:
+            dt = float(f["meta"].attrs["dt"])
+            t_p = f["radiator/times_p"][()]
+            t_v = f["radiator/times_v_half"][()]
+            v_half = f["radiator/v_pulse_half"][()]
+            v_int = f["radiator/v_pulse_integer"][()]
+            assert t_p.shape == (n_steps,)
+            for n in range(n_steps):
+                assert t_p[n] == pytest.approx((n + 1) * dt, rel=0, abs=1e-15)
+                assert t_v[n] == pytest.approx((n + 0.5) * dt, rel=0, abs=1e-15)
+                ref_half = velocity_pulse(t_v[n], d.pulse_sigma, d.pulse_t0)
+                ref_p = velocity_pulse(t_p[n], d.pulse_sigma, d.pulse_t0)
+                assert v_half[n] == pytest.approx(ref_half, rel=0, abs=1e-12)
+                assert v_int[n] == pytest.approx(ref_p, rel=0, abs=1e-12)

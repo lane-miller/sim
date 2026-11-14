@@ -121,7 +121,7 @@ Measured in C1-perf at ~375 M cell-updates/s, ~3.4 box transits, without surface
 
 | Check | What | Reference | Gate |
 |---|---|---|---|
-| C5-lowfreq | Small box (kL ≪ 1), radiator at least 10 cells across | Monopole: Re z → (ka)²/4 | Low-frequency z wrong → debug face pressure, half-step correction, CPML |
+| C5-lowfreq | 0.2 m cube, φ0.1 m centered radiator, f=20–1500 Hz; fit Re z = A k²(1+B k²), Im z = k δ(1+C k²) on kL≤0.2 (report kL≤1); gap×2 truncation run | Monopole: Re z → (ka)²/4; δ/a ≈ 0.61–0.85 | **G1** \|A/(S/4π)−1\|≤3%; **G2** Im z>0 on gate band and 0.55≤δ/a≤0.90; **G3** max\|z_gap2−z\|/\|z\|≤2% on gate band. Fail → debug face pressure, half-step / sampling, CPML |
 | C6-baffle | Large box, centered radiator | Baffled closed form (mean trend); Rayleigh near field | Area weighting or sign convention wrong |
 | C7-subcell | Radiator shifted by fractions of a cell | Smoothness of z | Area weighting wrong |
 | C8-convergence | Grid convergence (h, h/2) plus Richardson extrapolation; one float32 vs float64 run | Self-consistency | Sets the final defaults for points per wavelength and precision; checks edge-cell convergence |

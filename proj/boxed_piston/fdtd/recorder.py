@@ -367,6 +367,8 @@ class Recorder:
             self._w_v_int.max_buffer_bytes,
             self._w_v_half.max_buffer_bytes,
             self._w_p_avg.max_buffer_bytes,
+            self._w_rad_tp.max_buffer_bytes,
+            self._w_rad_tv.max_buffer_bytes,
             self._w_h_p.max_buffer_bytes,
             self._w_h_vn.max_buffer_bytes,
             self._w_h_tp.max_buffer_bytes,
@@ -394,9 +396,11 @@ class Recorder:
 
         rad = self._file.create_group("radiator")
         rad.attrs["description"] = "Unit pulse v(t); area-weighted radiator face pressure p_avg"
-        rad.attrs["v_integer_times"] = "t_n = n·Δt"
-        rad.attrs["v_half_times"] = "t_{n+½} = (n+½)·Δt"
-        rad.attrs["p_avg_times"] = "t_n = n·Δt (every step)"
+        rad.attrs["times_p_note"] = "t_p = (n+1)·Δt after step(n) (p^{n+1} on grid)"
+        rad.attrs["times_v_half_note"] = "t_v = (n+½)·Δt after step(n) (v^{n+½} on grid)"
+        rad.attrs["v_pulse_integer_note"] = (
+            "velocity_pulse(t_p); same pressure time level as p_avg (audit: not drive time)"
+        )
 
         huy = self._file.create_group("huygens")
         for name, arr in (
@@ -405,8 +409,8 @@ class Recorder:
             ("areas", huygens_patches.areas),
         ):
             huy.create_dataset(name, data=arr.astype(_F64), compression="gzip")
-        huy.attrs["p_times"] = "integer steps n·Δt, decimated n ≡ 0 (mod M)"
-        huy.attrs["vn_times"] = "half steps (n+½)·Δt, decimated when n ≡ 0 (mod M)"
+        huy.attrs["p_times"] = "t_p = (n+1)·Δt at decimated steps n ≡ 0 (mod M)"
+        huy.attrs["vn_times"] = "t_v = (n+½)·Δt at decimated steps n ≡ 0 (mod M)"
 
         box = self._file.create_group("box_surface")
         for name, arr in (
@@ -415,7 +419,10 @@ class Recorder:
             ("areas", box_patches.areas),
         ):
             box.create_dataset(name, data=arr.astype(_F64), compression="gzip")
-        box.attrs["p_times"] = "integer steps n·Δt, decimated n ≡ 0 (mod M)"
+        box.attrs["p_times"] = "t_p = (n+1)·Δt, decimated n ≡ 0 (mod M)"
+        meta.attrs["time_after_step_n"] = (
+            "sample() is called after step(n); fields.p is p^{n+1}, staggered v is v^{n+½}"
+        )
 
     def _create_extensible(
         self,
@@ -443,6 +450,8 @@ class Recorder:
         self._ds_v_int = self._create_extensible(rad, "v_pulse_integer", (), _F64, buf)
         self._ds_v_half = self._create_extensible(rad, "v_pulse_half", (), _F64, buf)
         self._ds_p_avg = self._create_extensible(rad, "p_avg", (), _F64, buf)
+        self._ds_rad_tp = self._create_extensible(rad, "times_p", (), _F64, buf)
+        self._ds_rad_tv = self._create_extensible(rad, "times_v_half", (), _F64, buf)
 
         huy = self._file["huygens"]
         nh = self._n_huy
@@ -459,6 +468,8 @@ class Recorder:
         self._w_v_int = _ChunkWriter(self._ds_v_int, buf)
         self._w_v_half = _ChunkWriter(self._ds_v_half, buf)
         self._w_p_avg = _ChunkWriter(self._ds_p_avg, buf)
+        self._w_rad_tp = _ChunkWriter(self._ds_rad_tp, buf)
+        self._w_rad_tv = _ChunkWriter(self._ds_rad_tv, buf)
         self._w_h_p = _ChunkWriter(self._ds_h_p, buf)
         self._w_h_vn = _ChunkWriter(self._ds_h_vn, buf)
         self._w_h_tp = _ChunkWriter(self._ds_h_tp, buf)
@@ -466,11 +477,19 @@ class Recorder:
         self._w_b_p = _ChunkWriter(self._ds_b_p, buf)
         self._w_b_t = _ChunkWriter(self._ds_b_t, buf)
 
+    def _time_p_after_step(self, n: int) -> float:
+        """Pressure time level after :func:`fdtd.kernels.step` with index *n*."""
+        return (float(n) + 1.0) * self.dt
+
+    def _time_v_after_step(self, n: int) -> float:
+        """Staggered velocity time level after :func:`fdtd.kernels.step` with index *n*."""
+        return (float(n) + 0.5) * self.dt
+
     def _radiator_p_avg(self, p_flat: np.ndarray, n: int) -> float:
         if self._rad_p_idx.size == 0:
             return 0.0
-        t_n = float(n) * self.dt
-        dvdt = velocity_pulse_derivative(t_n, self.sigma, self.t0)
+        t_p = self._time_p_after_step(n)
+        dvdt = velocity_pulse_derivative(t_p, self.sigma, self.t0)
         pc = p_flat[self._rad_p_idx].astype(_F64)
         corr = 0.5 * self.h * self.rho * self._rad_w * dvdt
         p_face = pc + corr
@@ -495,8 +514,8 @@ class Recorder:
         out = p_flat[self._box_idx_p].astype(_F32)
         if self._rad_p_idx.size == 0:
             return out
-        t_n = float(n) * self.dt
-        dvdt = velocity_pulse_derivative(t_n, self.sigma, self.t0)
+        t_p = self._time_p_after_step(n)
+        dvdt = velocity_pulse_derivative(t_p, self.sigma, self.t0)
         corr_scale = np.float32(0.5 * self.h * self.rho * dvdt)
         for q in range(n_p):
             loc = int(self._box_rad_local[q])
@@ -509,28 +528,30 @@ class Recorder:
         return out
 
     def sample(self, fields: Fields, n: int) -> None:
-        """Record fields at integer time index *n* (call after :func:`fdtd.kernels.step`)."""
+        """Record fields after :func:`fdtd.kernels.step` with index *n* (``p^{n+1}``, ``v^{n+½}``)."""
         if n != self._step:
             raise ValueError(f"expected step {self._step}, got {n}")
-        t_n = float(n) * self.dt
-        v_int = velocity_pulse(t_n, self.sigma, self.t0)
+        t_p = self._time_p_after_step(n)
+        t_v = self._time_v_after_step(n)
+        v_at_p = velocity_pulse(t_p, self.sigma, self.t0)
         v_half = velocity_at_half_step(n, self.dt, self.sigma, self.t0)
         p_flat = fields.p.reshape(-1)
 
-        self._w_v_int.append(v_int)
+        self._w_v_int.append(v_at_p)
         self._w_v_half.append(float(v_half))
         self._w_p_avg.append(self._radiator_p_avg(p_flat, n))
+        self._w_rad_tp.append(t_p)
+        self._w_rad_tv.append(t_v)
 
         if n % self.decim == 0:
-            t_half = (float(n) + 0.5) * self.dt
             self._w_h_p.append(self._huygens_p(p_flat).astype(_F32))
             self._w_h_vn.append(
                 self._huygens_vn(fields.vx, fields.vy, fields.vz)
             )
-            self._w_h_tp.append(t_n)
-            self._w_h_tvn.append(t_half)
+            self._w_h_tp.append(t_p)
+            self._w_h_tvn.append(t_v)
             self._w_b_p.append(self._box_surface_p(p_flat, n))
-            self._w_b_t.append(t_n)
+            self._w_b_t.append(t_p)
 
         self._step += 1
 
@@ -539,6 +560,8 @@ class Recorder:
             self._w_v_int,
             self._w_v_half,
             self._w_p_avg,
+            self._w_rad_tp,
+            self._w_rad_tv,
             self._w_h_p,
             self._w_h_vn,
             self._w_h_tp,
@@ -552,12 +575,13 @@ class Recorder:
         meta = self._file["meta"]
         meta.attrs["n_steps"] = n_full
         meta.attrs["n_samples_decimated"] = n_dec
-        times_full = np.arange(n_full, dtype=_F64) * self.dt if n_full else np.empty(0, _F64)
-        meta.create_dataset("sample_times_full", data=times_full, compression="gzip")
         if n_dec:
-            times_dec = (np.arange(n_dec, dtype=_F64) * self.decim) * self.dt
+            steps = np.arange(n_dec, dtype=_F64) * float(self.decim)
+            times_dec_p = (steps + 1.0) * self.dt
+            times_dec_v = (steps + 0.5) * self.dt
         else:
-            times_dec = np.empty(0, _F64)
-        meta.create_dataset("sample_times_decimated", data=times_dec, compression="gzip")
+            times_dec_p = times_dec_v = np.empty(0, _F64)
+        meta.create_dataset("sample_times_decimated_p", data=times_dec_p, compression="gzip")
+        meta.create_dataset("sample_times_decimated_v", data=times_dec_v, compression="gzip")
         self._file.close()
         self._file = None  # type: ignore[assignment]

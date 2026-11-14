@@ -178,19 +178,27 @@ def _dry_run_summary(cfg: Config, derived: Derived) -> dict[str, Any]:
     return summary
 
 
+def _sigfig4(x: float) -> str:
+    return f"{float(x):.4g}"
+
+
 def _print_dry_run_summary(summary: dict[str, Any]) -> None:
     print("dry run summary:")
     for key, val in summary.items():
         if key == "grid_shape":
             print(f"  {key}: {'×'.join(str(v) for v in val)}")
-        elif key in ("h", "dt"):
-            print(f"  {key}: {val:.6g} m" if key == "h" else f"  {key}: {val:.6g} s")
+        elif key == "h":
+            print(f"  {key}: {_sigfig4(val)} m")
+        elif key == "dt":
+            print(f"  {key}: {_sigfig4(val)} s")
         elif key == "memory_bytes":
-            print(f"  {key}: {val / 1e9:.3f} GB")
+            print(f"  {key}: {_sigfig4(val / 1e9)} GB")
         elif key == "output_bytes_est":
-            print(f"  {key}: {val / 1e6:.2f} MB (approx.)")
+            print(f"  {key}: {_sigfig4(val / 1e6)} MB (approx.)")
         elif key == "wall_time_s_est":
-            print(f"  {key}: {val:.2f} s (C1 envelope)")
+            print(f"  {key}: {_sigfig4(val)} s (C1 envelope)")
+        elif isinstance(val, float):
+            print(f"  {key}: {_sigfig4(val)}")
         else:
             print(f"  {key}: {val}")
 

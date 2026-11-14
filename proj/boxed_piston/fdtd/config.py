@@ -361,10 +361,11 @@ def validate(
     if derived.zrad_fallback:
         warnings.append("cell-budget fallback active (zrad_source will be analytic)")
 
-    if derived.ppw_realized < num.ppw - 1e-9:
+    _ppw_dispersion_ref = 20.0  # brief §2 default; warning is vs realized spacing, not config ppw
+    if derived.ppw_realized < _ppw_dispersion_ref - 1e-9:
         warnings.append(
             f"realized {derived.ppw_realized:.1f} points per wavelength < "
-            f"target ppw={num.ppw}"
+            f"default {_ppw_dispersion_ref:g}"
         )
 
     if cfg.box is not None:

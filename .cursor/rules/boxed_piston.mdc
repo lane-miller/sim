@@ -1,0 +1,19 @@
+---
+description: boxed_piston FDTD study conventions
+globs: proj/boxed_piston/**
+alwaysApply: false
+---
+- Only read/write code. Never run code, tests, or git commands.
+- Reply and write code/comments/docs in US English.
+- Spec: proj/boxed_piston/docs/brief.md. The brief describes the current
+  state only, with no history.
+- Do not change kernel, CPML, or source semantics unless explicitly asked.
+- Time convention e^{+jωt}; numpy forward FFT as-is, no conjugation.
+- Time levels: after step(n), p is at (n+1)Δt and v at (n+½)Δt. Post code
+  reads time arrays from the HDF5 file and never reconstructs them from n.
+- Scalar hygiene: use .item() or np.squeeze; no float() on arrays; helpers
+  return scalars for scalar input and preserve the input dtype.
+- Tests: pytest, fast by default; mark anything over ~5 s with the slow marker.
+- Validation scripts follow c01–c03: progress printouts, require_ram,
+  results JSON via to_json_safe.
+- End each reply with: files changed, assumed signatures, open issues.

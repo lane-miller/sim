@@ -1,5 +1,6 @@
 """Post-processing: Kirchhoff–Helmholtz and related reductions."""
 
+from .zrad import zrad_from_h5
 from .kirchhoff import (
     SurfacePatches,
     box_surface_patches,
@@ -13,6 +14,7 @@ from .kirchhoff import (
 )
 
 __all__ = [
+    "zrad_from_h5",
     "SurfacePatches",
     "box_surface_patches",
     "huygens_box_patches",
