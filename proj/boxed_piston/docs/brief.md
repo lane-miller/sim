@@ -82,7 +82,7 @@ A config-driven solver that computes, for **one physical system per run**:
   | `cpml.py` | CPML profiles and slab updates |
   | `source.py` | Pulse design and radiator injection |
   | `recorder.py` | Chunked HDF5 output |
-  | `run.py` | Entry point: config → run → HDF5 |
+  | `run.py` | Entry point: config → run → HDF5 (`python -m fdtd.run CONFIG [-o OUT] [--dry-run] [--quiet]`) |
   | `post/` | z(f), Kirchhoff–Helmholtz, probes |
   | `validation/` | Check scripts (`c01_perf.py` … `c10_power.py`) |
 

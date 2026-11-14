@@ -199,7 +199,9 @@ def test_huygens_p_matches_face_p_from_cells_cubic():
     est = rec._huygens_p(p_flat)
     for q in range(idx4.shape[0]):
         samples = [float(p_flat[idx4[q, s]]) for s in range(4)]
-        ref = float(face_p_from_cells(*samples, order=4))
+        ref = face_p_from_cells(*samples, order=4)
+        if hasattr(ref, "item"):
+            ref = ref.item()
         assert est[q] == pytest.approx(ref, rel=0, abs=1e-4)
 
 

@@ -117,16 +117,32 @@ def face_p_from_cells(
     Samples lie at −3h/2, −h/2, +h/2, +3h/2 from the face (outward normal ``n``).
     ``order=4`` uses the cubic face rule (−1, 9, 9, −1)/16 (O(h⁴)); ``order=2`` is
     the two-point mean of the ±h/2 centers (O(h²)).
+
+    Preserves input kind: real samples yield a real array or scalar; complex samples
+    yield complex. Scalar inputs return a NumPy scalar (``.item()``-equivalent).
     """
-    p_m3 = np.asarray(p_m3, dtype=_C128)
-    p_m1 = np.asarray(p_m1, dtype=_C128)
-    p_p1 = np.asarray(p_p1, dtype=_C128)
-    p_p3 = np.asarray(p_p3, dtype=_C128)
+    raw = (p_m3, p_m1, p_p1, p_p3)
+    scalar_in = all(np.isscalar(x) for x in raw)
+    arrays = [np.asarray(x) for x in raw]
+    is_complex = any(a.dtype.kind == "c" for a in arrays)
+    if is_complex:
+        dtype = np.result_type(*arrays)
+        if dtype.kind != "c":
+            dtype = _C128
+    else:
+        dtype = np.result_type(*arrays)
+        if dtype.kind == "c":
+            dtype = _F64
+    p_m3, p_m1, p_p1, p_p3 = [np.asarray(x, dtype=dtype) for x in raw]
     if order == 2:
-        return 0.5 * (p_m1 + p_p1)
-    if order == 4:
-        return (-p_m3 + 9.0 * p_m1 + 9.0 * p_p1 - p_p3) / 16.0
-    raise ValueError(f"order must be 2 or 4, got {order!r}")
+        out = 0.5 * (p_m1 + p_p1)
+    elif order == 4:
+        out = (-p_m3 + 9.0 * p_m1 + 9.0 * p_p1 - p_p3) / 16.0
+    else:
+        raise ValueError(f"order must be 2 or 4, got {order!r}")
+    if scalar_in:
+        return np.asarray(out).item()
+    return out
 
 
 def huygens_box_patches(
