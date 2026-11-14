@@ -34,8 +34,8 @@ A config-driven solver that computes, for **one physical system per run**:
 - **Config validation:** reject radiators closer than 2–3 cells to any box edge. Tangent radiators are not physical and can't be resolved.
 - **Excitation:** one band-limited Gaussian velocity pulse per run, with no derivative so there is energy down to DC. Its width is chosen so the spectrum falls to about −40 dB near 1.2·f_max, which keeps out content the grid can't represent. Transfer functions are output spectrum divided by input spectrum.
 - **Run length:** until the response decays below a threshold that accounts for low frequency, typically a few box-transit times plus the pulse length. Example: a 300 mm box needs about 5–10 ms, or 3,000–6,000 steps. Low frequencies come out of the same run, because a box in free space doesn't ring.
-- **Domain:** the box, plus an air gap (default 10–30 mm), plus the CPML. The far field comes from Kirchhoff–Helmholtz over the box faces, so the grid doesn't need to reach the far field.
-- **Absorber:** CPML (Roden & Gedney), default 10–20 cells, with a small graded α of about π·f_min. The reflection is reported in dB against f, with a target of −80 dB or better at f_min.
+- **Domain:** the box, plus an air gap default 10 cells (C3 passes at 5; margin until box tests C9), plus the CPML. The far field comes from Kirchhoff–Helmholtz over the box faces, so the grid doesn't need to reach the far field.
+- **Absorber:** CPML 16 cells, R=1e-6, m=3, κ_max=1, α=π·f_min (C3-cpml: −100 dB normal / −100 dB oblique; low-f Z gap-converged ≤0.5% from 5 cells). Large α (≥100·π·f_min) degrades low-f Re Z; keep α small.
 - **Precision:** fields in float32; spectral and DFT accumulation in float64. Constants are cast explicitly so nothing is silently promoted.
 - **Time staggering:** p is sampled at integer steps and v at half steps. Correct the v spectra by e^{jωΔt/2}, with the sign set by the convention, before forming z or Kirchhoff–Helmholtz terms.
 - **Face pressure:**
@@ -105,6 +105,8 @@ Measured in C1-perf at ~375 M cell-updates/s, ~3.4 box transits, without surface
 | C2-dispersion | Free-field point source, on axis and diagonal; phase error vs points per wavelength; long-run stability | Analytic | Phase error unacceptable at affordable points per wavelength → change the scheme before going further |
 | C3-cpml | Absorber on a small case vs a very large reference domain. Vary σ_max, α, thickness and gap; include grazing incidence. | Large domain | Can't reach about −80 dB at f_min → rethink low-frequency handling |
 
+**Stage A results:** C1-perf **PASS** (2026-11-13, ~390 M cell-updates/s peak). C2-dispersion **PASS** (2026-11-13, stability ratio ≪10⁻³; ≈1°/λ axis lag at ppw 20). C3-cpml **PASS** (2026-11-14, −100 dB normal and oblique reflection).
+
 **Stage B: post-processing, standalone** (no FDTD needed).
 
 | Check | What | Reference | Gate |
@@ -150,4 +152,5 @@ Days 1–3 are the critical path. If they slip, reduce the scope of C9; don't sk
 
 ## 8. Open questions
 - Dispersion (C2-dispersion, PASS): solver matches exact Yee dispersion (mean lag within 5%). At ppw 20 the worst-direction (axis) phase lag is ≈1°/λ, giving ≈35–42° over a 600 mm path at 20 kHz; ≤10° needs ppw ≈ 35–38 (~10–13× cost). Decision deferred to C8-convergence, which measures the actual directivity error on a box at h and h/2.
+- Source-impedance Re Z from cube-averaged ⟨p⟩ is ~9% low vs ρck²/(4π) at 50–500 Hz (constant ratio; far-field calibration exact; gap-independent). Likely averaging/sampling definition. Check analogous Z_rad bias in C5-lowfreq.
 - acs-lpm interface needs (frequency grid, angle grid, phase reference): to be specified once single runs are verified.

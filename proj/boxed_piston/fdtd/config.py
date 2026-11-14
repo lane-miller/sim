@@ -8,8 +8,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 F_MAX_CAP_HZ = 20_000.0
+# C3-cpml: cpml_cells=16, R=1e-6, m=3, κ_max=1, α_factor=1 (α=π·f_min in derive); gap≥5 cells LF Z.
 DEFAULT_CPML_CELLS = 16
-DEFAULT_GAP_CELLS = 2
+DEFAULT_GAP_CELLS = 10  # default margin over C3 gap pass at 5 cells (until box checks C9)
 DEFAULT_RAM_LIMIT_BYTES = 5 * 1024**3
 SQRT3 = math.sqrt(3.0)
 
@@ -226,7 +227,7 @@ def derive(cfg: Config) -> Derived:
     * **Domain** — along each axis: ``cpml + gap + box_cells + gap + cpml`` (free-field:
       zero box cells; at least one cell per axis).
     * **CPML α** — ``cpml_alpha_factor · π · f_min``.
-    * **Gap** — ``gap_cells`` (default 2) times ``h``.
+    * **Gap** — ``gap_cells`` (default 10) times ``h``.
     * **Memory** — staggered float32 ``p``/``v`` arrays plus CPML ``ψ`` face slabs
       (see :func:`estimate_memory_bytes`).
     * **Gaussian pulse** — ``σ`` such that ``|V(f)|`` is ``pulse_db`` at
