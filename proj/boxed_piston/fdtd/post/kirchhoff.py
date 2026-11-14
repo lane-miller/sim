@@ -145,6 +145,77 @@ def face_p_from_cells(
     return out
 
 
+def huygens_open_patches(
+    W: float,
+    H: float,
+    D: float,
+    h: float,
+    origin: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    offset_cells: int = 3,
+) -> SurfacePatches:
+    """Five-face Huygens surface (omit z-min) for an infinite rigid baffle at ``origin[2]``.
+
+    Lateral extent matches :func:`huygens_box_patches` (``offset_cells·h`` beyond the
+    radiator bounding box on ±x and ±y). Vertically the surface is open below the baffle:
+    for baffle runs set ``D = 0`` so side faces run from ``origin[2]`` to
+    ``origin[2]+pad``, the top face sits at ``origin[2]+pad``, and the −z face is omitted.
+    The lowest side-face patch centers sit at ``origin[2]+h/2`` so staggered pressure
+    stencils stay at valid ``k ≥ 0``.
+    """
+    ox, oy, oz = origin
+    pad = float(offset_cells) * float(h)
+    ox2, oy2 = ox - pad, oy - pad
+    oz2 = oz
+    W2, H2 = W + 2.0 * pad, H + 2.0 * pad
+    D2 = D + pad
+    h = float(h)
+
+    def _axis_centers(x0: float, length: float) -> np.ndarray:
+        n = max(1, int(round(length / h)))
+        return x0 + (np.arange(n, dtype=_F64) + 0.5) * h
+
+    xs_in = _axis_centers(ox2, W2)
+    ys_in = _axis_centers(oy2, H2)
+    zs_in = _axis_centers(oz2, D2)
+
+    centers_list: list[np.ndarray] = []
+    normals_list: list[np.ndarray] = []
+    areas_list: list[float] = []
+
+    def _add_face(
+        fixed_coord: float,
+        axis_fixed: int,
+        u_centers: np.ndarray,
+        v_centers: np.ndarray,
+        normal: np.ndarray,
+    ) -> None:
+        nu, nv = len(u_centers), len(v_centers)
+        pts = np.zeros((nu * nv, 3), dtype=_F64)
+        tang = [i for i in range(3) if i != axis_fixed]
+        uu, vv = np.meshgrid(u_centers, v_centers, indexing="ij")
+        pts[:, axis_fixed] = fixed_coord
+        pts[:, tang[0]] = uu.ravel()
+        pts[:, tang[1]] = vv.ravel()
+        centers_list.append(pts)
+        normals_list.append(np.tile(normal, (nu * nv, 1)))
+        areas_list.extend([h * h] * (nu * nv))
+
+    ex = np.array([1.0, 0.0, 0.0], dtype=_F64)
+    ey = np.array([0.0, 1.0, 0.0], dtype=_F64)
+    ez = np.array([0.0, 0.0, 1.0], dtype=_F64)
+
+    _add_face(ox2, 0, ys_in, zs_in, -ex)
+    _add_face(ox2 + W2, 0, ys_in, zs_in, ex)
+    _add_face(oy2, 1, xs_in, zs_in, -ey)
+    _add_face(oy2 + H2, 1, xs_in, zs_in, ey)
+    _add_face(oz2 + D2, 2, xs_in, ys_in, ez)
+
+    centers = np.vstack(centers_list)
+    normals = np.vstack(normals_list)
+    areas = np.asarray(areas_list, dtype=_F64)
+    return SurfacePatches(centers=centers, normals=normals, areas=areas, h=h)
+
+
 def huygens_box_patches(
     W: float,
     H: float,
@@ -222,6 +293,21 @@ def _green(k: float | np.ndarray, R: np.ndarray) -> np.ndarray:
     return np.exp(-1j * k_arr[:, np.newaxis] * R) / (4.0 * np.pi * R)
 
 
+def _reflect_points(y: np.ndarray, image_plane_z: float) -> np.ndarray:
+    """Mirror points across the plane z = ``image_plane_z``."""
+    y_img = np.array(y, dtype=_F64, copy=True)
+    y_img[..., 2] = 2.0 * float(image_plane_z) - y_img[..., 2]
+    return y_img
+
+
+def _reflect_normals_z(normals: np.ndarray, image_plane_z: float) -> np.ndarray:
+    """Mirror outward normals across ``z = image_plane_z`` (flip the z component)."""
+    _ = image_plane_z  # horizontal plane; only z sign flips
+    n_img = np.array(normals, dtype=_F64, copy=True)
+    n_img[..., 2] *= -1.0
+    return n_img
+
+
 def _green_dn(
     k: float | np.ndarray,
     R: np.ndarray,
@@ -263,6 +349,7 @@ def kh_pressure(
     near_subdivide: bool = True,
     near_threshold: float | None = None,
     subdivide_grid: int = 4,
+    image_plane_z: float | None = None,
 ) -> np.ndarray:
     """Exterior KH pressure at ``points`` (M, 3); returns (F, M) complex128.
 
@@ -310,6 +397,13 @@ def kh_pressure(
 
                 G = _green(kf, R)
                 dGdn = _green_dn(kf, R, rdx, nc)
+                if image_plane_z is not None:
+                    yc_img = _reflect_points(yc, float(image_plane_z))
+                    nc_img = _reflect_normals_z(nc, float(image_plane_z))
+                    rdx_i = pts[:, np.newaxis, :] - yc_img[np.newaxis, :, :]
+                    R_i = np.linalg.norm(rdx_i, axis=-1)
+                    G = G + _green(kf, R_i)
+                    dGdn = dGdn + _green_dn(kf, R_i, rdx_i, nc_img)
 
                 contrib = (pc[np.newaxis, :] * dGdn - G * dpc[np.newaxis, :]) * ac[np.newaxis, :]
                 chunk_acc += np.sum(contrib, axis=-1)
@@ -410,6 +504,8 @@ def kh_far_field(
     p: np.ndarray,
     dpdn: np.ndarray,
     k: np.ndarray,
+    *,
+    image_plane_z: float | None = None,
 ) -> np.ndarray:
     """Far-field amplitude A(d) = lim_{r→∞} p(r d)·r·e^{jkr}, shape (F, D).
 
@@ -427,6 +523,14 @@ def kh_far_field(
     y = patches.centers
     n_hat = patches.normals
     areas = patches.areas
+    if image_plane_z is not None:
+        y_img = _reflect_points(y, float(image_plane_z))
+        n_img = _reflect_normals_z(n_hat, float(image_plane_z))
+        y = np.vstack([y, y_img])
+        n_hat = np.vstack([n_hat, n_img])
+        areas = np.concatenate([areas, areas])
+        p = np.concatenate([p, p], axis=-1)
+        dpdn = np.concatenate([dpdn, dpdn], axis=-1)
 
     D = directions.shape[0]
     F = k.shape[0]
@@ -445,7 +549,13 @@ def far_field_at_radius(
     k: np.ndarray,
     R_ref: float = 1.0,
 ) -> np.ndarray:
-    """Pressure at distance ``R_ref`` along each far-field direction: p = A e^{−jkR}/R."""
+    """Pressure at distance ``R_ref`` from :func:`kh_far_field` amplitudes.
+
+    ``kh_far_field`` returns the Fraunhofer coefficient A(d) in
+    p(x) ≈ A(d) e^{−jkR}/R as R→∞. This helper evaluates that asymptotic
+    pressure at finite ``R_ref``: ``p = A e^{−jk R_ref}/R_ref`` (same shape
+    as ``amplitude``).
+    """
     amplitude = np.asarray(amplitude, dtype=_C128)
     k = np.asarray(k, dtype=_F64)
     return amplitude * np.exp(-1j * k[:, np.newaxis] * R_ref) / R_ref

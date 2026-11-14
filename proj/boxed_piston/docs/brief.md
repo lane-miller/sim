@@ -45,7 +45,7 @@ A config-driven solver that computes, for **one physical system per run**:
   - Far field / KH uses a **Huygens surface** (C4-kh), not the box faces; box-face p is for surface probes.
 
 ## 3. Software design
-- **Input:** a JSON config holding box dimensions, radiator shape, size and position, f_min, f_max, tolerances, optional overrides for derived parameters, the far-field angle grid, and the output path. Shipped examples: `configs/default.json` (dataclass defaults), `configs/smoke.json` (small end-to-end case).
+- **Input:** a JSON config with **`geometry`**: `box` (default) or `baffle`. Box mode requires box dimensions; baffle mode uses a half-space rigid plane at z-min (no box, no z-min CPML) with lateral domain sized to the radiator bounding box. Also: radiator shape, size and position, f_min, f_max, tolerances, optional overrides, far-field angle grid, output path. Examples: `configs/default.json`, `configs/smoke.json`, `configs/c06_baffle.json`.
 - **Pre-flight check:** before any computation, `run.py` prints a summary of the derived parameters and the estimates (cells, RAM, disk, run time), then lists warnings and errors. It waits for confirmation unless `--yes` is passed.
   - **Errors** (the run stops): a radiator tangent to an edge or within 2–3 cells of one; geometry that doesn't fit the box; the RAM estimate exceeds available memory.
   - **Warnings** (the run continues):
@@ -122,7 +122,7 @@ Measured in C1-perf at ~375 M cell-updates/s, ~3.4 box transits, without surface
 | Check | What | Reference | Gate |
 |---|---|---|---|
 | C5-lowfreq | 0.2 m cube, φ0.1 m centered radiator, f=20–1500 Hz; fit Re z = A k²(1+B k²), Im z = k δ(1+C k²) on kL≤0.2 (report kL≤1); gap×2 truncation run | Monopole: Re z → (ka)²/4; δ/a ≈ 0.61–0.85 | **G1** \|A/(S/4π)−1\|≤3%; **G2** Im z>0 on gate band and 0.55≤δ/a≤0.90; **G3** max\|z_gap2−z\|/\|z\|≤2% on gate band. Fail → debug face pressure, half-step / sampling, CPML |
-| C6-baffle | Large box, centered radiator | Baffled closed form (mean trend); Rayleigh near field | Area weighting or sign convention wrong |
+| C6-baffle | **Baffle** geometry (`configs/c06_baffle.json`): φ0.1 m centered circle, f=100–6000 Hz (~35 cells across, ka_max≈5.5); half-space rigid plane at z-min (no z-min CPML), five-face Huygens; KH with `image_plane_z=0` and mirrored image normals; spectra via `post.spectra.spectrum` (Δt-weighted sum at stored times); optional on-axis probes (`output.probes_baffle_z_cells`) | Baffled piston: `z_ref` from `j1` / Struve H₁ | **G1** low ka: fit Re z = A k²(1+B k²) for ka≤0.3; \|A/(S/2π)−1\|≤2%. **G2** max \|z−z_ref\|≤0.03 on band. **G3** transfer \(H=P/V\): `kh_pressure` on axis at r=100·a vs \(H_{\mathrm{exact}}(r)=\rho c[e^{-jkr}-e^{-jk\sqrt{r^2+a^2}}]\) at ka=1,3,5 (±0.3 dB, 5°); report `kh_far_field` vs `kh_pressure` and \|H(θ)/H(0)\| vs \(2J_1(ka\sinθ)/(ka\sinθ)\). **G3-probe** (report): \(H_{\mathrm{KH}}, H_{\mathrm{exact}}\) vs \(H_{\mathrm{FDTD}}\) at probe heights. Tail ≤−80 dB |
 | C7-subcell | Radiator shifted by fractions of a cell | Smoothness of z | Area weighting wrong |
 | C8-convergence | Grid convergence (h, h/2) plus Richardson extrapolation; one float32 vs float64 run | Self-consistency | Sets the final defaults for points per wavelength and precision; checks edge-cell convergence |
 
@@ -156,5 +156,4 @@ Days 1–3 are the critical path. If they slip, reduce the scope of C9; don't sk
 
 ## 8. Open questions
 - Dispersion (C2-dispersion, PASS): solver matches exact Yee dispersion (mean lag within 5%). At ppw 20 the worst-direction (axis) phase lag is ≈1°/λ, giving ≈35–42° over a 600 mm path at 20 kHz; ≤10° needs ppw ≈ 35–38 (~10–13× cost). Decision deferred to C8-convergence, which measures the actual directivity error on a box at h and h/2.
-- Source-impedance Re Z from cube-averaged ⟨p⟩ is ~9% low vs ρck²/(4π) at 50–500 Hz (constant ratio; far-field calibration exact; gap-independent). Likely averaging/sampling definition. Check analogous Z_rad bias in C5-lowfreq.
 - acs-lpm interface needs (frequency grid, angle grid, phase reference): to be specified once single runs are verified.

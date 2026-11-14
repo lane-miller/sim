@@ -31,7 +31,11 @@ from fdtd.config import (
 from fdtd.cpml import make_cpml_state
 from fdtd.grid import Grid, allocate_fields
 from fdtd.kernels import make_update_coeffs, step
-from fdtd.post.kirchhoff import box_surface_patches, huygens_box_patches
+from fdtd.post.kirchhoff import (
+    box_surface_patches,
+    huygens_box_patches,
+    huygens_open_patches,
+)
 from fdtd.recorder import Recorder, decimation_factor, resolve_huygens_offset
 from fdtd.source import BoxBoundary
 
@@ -70,6 +74,14 @@ def _resolve_out_path(cfg: Config, cfg_source: Config | str | Path, out_path: Pa
 
 
 def _box_origin(cfg: Config, derived: Derived) -> tuple[float, float, float]:
+    if cfg.geometry == "baffle":
+        xc = float(cfg.radiator.x_c)
+        yc = float(cfg.radiator.y_c)
+        return (
+            -xc - 0.5 * derived.realized_W,
+            -yc - 0.5 * derived.realized_H,
+            0.0,
+        )
     xc = float(cfg.radiator.x_c)
     yc = float(cfg.radiator.y_c)
     return (
@@ -93,23 +105,36 @@ def _estimate_output_bytes(cfg: Config, derived: Derived) -> int:
     m = decimation_factor(derived.f_max, derived.dt)
     n_full = derived.n_steps
     n_dec = (n_full + m - 1) // m if n_full else 0
-    origin = _box_origin(cfg, derived)
     offset = resolve_huygens_offset(cfg)
-    nh = huygens_box_patches(
-        derived.realized_W,
-        derived.realized_H,
-        derived.realized_D,
-        derived.h,
-        origin,
-        offset_cells=offset,
-    ).centers.shape[0]
-    nb = box_surface_patches(
-        derived.realized_W,
-        derived.realized_H,
-        derived.realized_D,
-        derived.h,
-        origin,
-    ).centers.shape[0]
+    if cfg.geometry == "baffle":
+        origin = _box_origin(cfg, derived)
+        depth = 0.0
+        nh = huygens_open_patches(
+            derived.realized_W,
+            derived.realized_H,
+            depth,
+            derived.h,
+            origin,
+            offset_cells=offset,
+        ).centers.shape[0]
+        nb = 0
+    else:
+        origin = _box_origin(cfg, derived)
+        nh = huygens_box_patches(
+            derived.realized_W,
+            derived.realized_H,
+            derived.realized_D,
+            derived.h,
+            origin,
+            offset_cells=offset,
+        ).centers.shape[0]
+        nb = box_surface_patches(
+            derived.realized_W,
+            derived.realized_H,
+            derived.realized_D,
+            derived.h,
+            origin,
+        ).centers.shape[0]
     nbytes = n_full * 3 * 8  # v_int, v_half, p_avg (float64)
     nbytes += n_dec * (nh * 4 + nh * 4 + nb * 4)  # huygens + box p (float32)
     nbytes += n_dec * 4 * 8  # decimated time stamps (float64)
@@ -174,6 +199,7 @@ def _dry_run_summary(cfg: Config, derived: Derived) -> dict[str, Any]:
         "output_bytes_est": _estimate_output_bytes(cfg, derived),
         "wall_time_s_est": _estimate_wall_time_s(derived),
         "zrad_source": "analytic_baffled" if derived.zrad_fallback else "fdtd",
+        "geometry": cfg.geometry,
     }
     return summary
 
@@ -247,8 +273,8 @@ def run(
     """Validate config, run FDTD (or dry-run summary), write HDF5 unless ``dry_run``."""
     cfg_source = cfg
     config = _load_config(cfg)
-    if config.box is None:
-        raise ValueError("run requires cfg.box (boxed-piston geometry)")
+    if config.geometry == "box" and config.box is None:
+        raise ValueError("run requires cfg.box when geometry=box")
 
     derived = derive(config)
     errors, warnings = validate(config, derived, ram_limit_bytes=ram_limit_bytes)

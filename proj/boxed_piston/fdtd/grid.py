@@ -96,8 +96,11 @@ def _slab(lo: int, hi: int) -> SlabRange:
     return SlabRange(lo, hi)
 
 
-def build_cpml_slabs(nx: int, ny: int, nz: int, cpml: int) -> CpmlSlabs:
+def build_cpml_slabs(
+    nx: int, ny: int, nz: int, cpml: int, *, k_inner_lo: int | None = None
+) -> CpmlSlabs:
     c = cpml
+    k_lo = c if k_inner_lo is None else k_inner_lo
     return CpmlSlabs(
         cpml_cells=c,
         p_x_neg=_slab(0, c),
@@ -114,7 +117,7 @@ def build_cpml_slabs(nx: int, ny: int, nz: int, cpml: int) -> CpmlSlabs:
         vz_z_pos=_slab(nz - c, nz + 1),
         i_inner=_slab(c, nx - c),
         j_inner=_slab(c, ny - c),
-        k_inner=_slab(c, nz - c),
+        k_inner=_slab(k_lo, nz - c),
     )
 
 
@@ -135,9 +138,11 @@ class Grid:
         self.ny = derived.ny
         self.nz = derived.nz
         self.cpml = derived.cpml_cells
+        k_inner_lo = 0 if cfg.geometry == "baffle" else None
         self.cpml_slabs = build_cpml_slabs(
-            self.nx, self.ny, self.nz, self.cpml
+            self.nx, self.ny, self.nz, self.cpml, k_inner_lo=k_inner_lo
         )
+        self.geometry = cfg.geometry
         self.radiator_supersample = int(radiator_supersample)
 
         self.realized_W = float(derived.realized_W)
@@ -163,7 +168,9 @@ class Grid:
         self.radiator_area_exact: float | None = None
         self.radiator_area_grid: float | None = None
 
-        if cfg.box is None:
+        if cfg.geometry == "baffle":
+            self._build_baffle_geometry(cfg)
+        elif cfg.box is None:
             self.x_p = self._cell_centers_domain_centered(self.nx)
             self.y_p = self._cell_centers_domain_centered(self.ny)
             self.z_p = self._cell_centers_domain_centered(self.nz)
@@ -255,6 +262,72 @@ class Grid:
         self.radiator_area_exact = radiator_area_exact(cfg.radiator)
         self.radiator_area_grid = float(np.sum(w_plane) * h * h)
 
+    def _build_baffle_geometry(self, cfg: Config) -> None:
+        """Baffle: radiator on domain z-min face; origin at radiator center, +z outward."""
+        d = self.derived
+        gap = d.gap_cells
+        c = self.cpml
+        self.i_box = ib = c + gap
+        self.j_box = jb = c + gap
+        self.k_box = kb = 0
+        nbx, nby = self.nbx, self.nby
+        self.k_face_z = kb
+
+        xc = float(cfg.radiator.x_c)
+        yc = float(cfg.radiator.y_c)
+        rw, rh = self.realized_W, self.realized_H
+        h = self.h
+
+        ii = np.arange(self.nx, dtype=_FLOAT32)
+        jj = np.arange(self.ny, dtype=_FLOAT32)
+        kk = np.arange(self.nz, dtype=_FLOAT32)
+        self.x_p = (-xc - 0.5 * rw + (ii - float(ib) + 0.5) * h).astype(_FLOAT32)
+        self.y_p = (-yc - 0.5 * rh + (jj - float(jb) + 0.5) * h).astype(_FLOAT32)
+        self.z_p = ((kk + 0.5) * h).astype(_FLOAT32)
+        self.x_vx = (-xc - 0.5 * rw + (np.arange(self.nx + 1, dtype=_FLOAT32) - float(ib)) * h)
+        self.y_vy = (-yc - 0.5 * rh + (np.arange(self.ny + 1, dtype=_FLOAT32) - float(jb)) * h)
+        self.z_vz = (np.arange(self.nz + 1, dtype=_FLOAT32) * h)
+
+        p_shape = (self.nx, self.ny, self.nz)
+        self.box_cells = np.zeros(p_shape, dtype=bool)
+
+        self.rigid_vx = np.zeros((self.nx + 1, self.ny, self.nz), dtype=bool)
+        self.rigid_vy = np.zeros((self.nx, self.ny + 1, self.nz), dtype=bool)
+        self.rigid_vz = np.zeros((self.nx, self.ny, self.nz + 1), dtype=bool)
+
+        j0, j1 = jb, jb + nby
+        i0, i1 = ib, ib + nbx
+        kf = self.k_face_z
+        self.rigid_vz[:, :, kf] = True
+
+        w_plane = _radiator_face_weights(
+            cfg.radiator,
+            self.x_p[i0:i1],
+            self.y_p[j0:j1],
+            h,
+            self.radiator_supersample,
+        )
+        self.rigid_vz[i0:i1, j0:j1, kf] &= w_plane == 0.0
+
+        ii_sub, jj_sub = np.nonzero(w_plane > 0.0)
+        ni = len(ii_sub)
+        if ni:
+            i_rad = ii_sub + i0
+            j_rad = jj_sub + j0
+            k_rad = np.full(ni, kf, dtype=np.int64)
+            self.radiator_face_indices = (i_rad, j_rad, k_rad)
+            self.radiator_weights = w_plane[w_plane > 0.0].astype(_F64)
+        else:
+            self.radiator_face_indices = (
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+            )
+            self.radiator_weights = np.array([], dtype=_F64)
+
+        self.radiator_area_exact = radiator_area_exact(cfg.radiator)
+        self.radiator_area_grid = float(np.sum(w_plane) * h * h)
+
     def coords_of(self, i: int, j: int, k: int) -> tuple[float, float, float]:
         """Pressure cell-center coordinates (m) at indices ``(i, j, k)``."""
         return (
@@ -266,18 +339,25 @@ class Grid:
     def index_of(self, x: float, y: float, z: float) -> tuple[int, int, int]:
         """Nearest pressure cell indices to physical coordinates ``(x, y, z)``."""
         h = self.h
-        if self.cfg.box is None:
-            i = int(round(x / h + 0.5 * self.nx - 0.5))
-            j = int(round(y / h + 0.5 * self.ny - 0.5))
-            k = int(round(z / h + 0.5 * self.nz - 0.5))
-        else:
+        if self.geometry == "baffle" or self.cfg.box is not None:
+            if self.i_box is None or self.j_box is None or self.k_box is None:
+                raise ValueError("grid has no box/baffle origin indices")
             ib, jb, kb = self.i_box, self.j_box, self.k_box
             xc = float(self.cfg.radiator.x_c)
             yc = float(self.cfg.radiator.y_c)
-            rw, rd = self.realized_W, self.realized_D
+            rw = self.realized_W
+            rh = self.realized_H
+            rd = self.realized_D
             i = int(round((x + xc + 0.5 * rw) / h + float(ib) - 0.5))
-            j = int(round((y + yc + 0.5 * self.realized_H) / h + float(jb) - 0.5))
-            k = int(round((z + rd) / h + float(kb) - 0.5))
+            j = int(round((y + yc + 0.5 * rh) / h + float(jb) - 0.5))
+            if self.geometry == "baffle":
+                k = int(round(z / h + float(kb) - 0.5))
+            else:
+                k = int(round((z + rd) / h + float(kb) - 0.5))
+        else:
+            i = int(round(x / h + 0.5 * self.nx - 0.5))
+            j = int(round(y / h + 0.5 * self.ny - 0.5))
+            k = int(round(z / h + 0.5 * self.nz - 0.5))
         i = max(0, min(self.nx - 1, i))
         j = max(0, min(self.ny - 1, j))
         k = max(0, min(self.nz - 1, k))
@@ -402,7 +482,7 @@ def validate_box_radiator_on_grid(
     cfg: Config, derived: Derived, grid: Grid | None = None
 ) -> list[str]:
     """Errors if the radiator does not fit on the realized front face with edge clearance."""
-    if cfg.box is None:
+    if cfg.geometry != "box" or cfg.box is None:
         return []
     errors: list[str] = []
     h = derived.h

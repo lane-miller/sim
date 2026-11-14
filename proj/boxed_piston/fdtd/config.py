@@ -15,6 +15,7 @@ DEFAULT_RAM_LIMIT_BYTES = 5 * 1024**3
 SQRT3 = math.sqrt(3.0)
 
 RadiatorShape = Literal["circle", "rect", "racetrack"]
+GeometryMode = Literal["box", "baffle"]
 
 
 @dataclass
@@ -64,11 +65,16 @@ class Numerics:
 
 @dataclass
 class Output:
+    """Run output path plus optional pressure probe targets."""
+
     path: str = ""
+    probes: list[list[float]] | None = None  # each [x, y, z] in meters
+    probes_baffle_z_cells: list[int] | None = None  # baffle: z = (k + ½) h on radiator axis
 
 
 @dataclass
 class Config:
+    geometry: GeometryMode = "box"
     air: Air = field(default_factory=Air)
     box: Box | None = None
     radiator: Radiator = field(
@@ -85,6 +91,7 @@ class Config:
     def from_dict(cls, data: dict[str, Any]) -> Config:
         box = None if data.get("box") is None else Box(**data["box"])
         return cls(
+            geometry=data.get("geometry", "box"),
             air=Air(**data.get("air", {})),
             box=box,
             radiator=Radiator(**data["radiator"]),
@@ -130,6 +137,12 @@ class Derived:
     run_time_s: float
     n_steps: int
     ppw_realized: float
+    cpml_sides: tuple[bool, bool, bool, bool, bool, bool]
+    geometry: GeometryMode
+
+
+CPML_SIDES_ALL = (True, True, True, True, True, True)
+CPML_SIDES_BAFFLE = (True, True, True, True, False, True)
 
 
 def _radiator_D(radiator: Radiator) -> float:
@@ -160,6 +173,22 @@ def _radiator_half_extents(radiator: Radiator) -> tuple[float, float]:
     if radiator.shape == "racetrack":
         return radiator.dims[0] / 2.0, radiator.dims[1] / 2.0
     raise ValueError(f"unknown radiator shape: {radiator.shape!r}")
+
+
+def _baffle_domain_counts(
+    radiator: Radiator, h: float, gap_cells: int, cpml_cells: int
+) -> tuple[int, int, int, int, int, int, float, float, float]:
+    """Radiator-centered baffle: lateral = bbox + gap + CPML; +z = gap + CPML (no z-min CPML)."""
+    hx, hy = _radiator_half_extents(radiator)
+    nbx = max(1, round(2.0 * hx / h))
+    nby = max(1, round(2.0 * hy / h))
+    nbz = 0
+    rw, rh = nbx * h, nby * h
+    rd = 0.0
+    nx = nbx + 2 * gap_cells + 2 * cpml_cells
+    ny = nby + 2 * gap_cells + 2 * cpml_cells
+    nz = gap_cells + cpml_cells
+    return nbx, nby, nbz, nx, ny, nz, rw, rh, rd
 
 
 def _domain_counts(
@@ -250,9 +279,14 @@ def derive(cfg: Config) -> Derived:
     h_from_radiator = D / num.cells_across_radiator
     h_try = min(h_from_ppw, h_from_radiator)
 
-    nbx, nby, nbz, nx, ny, nz, _, _, _ = _domain_counts(
-        cfg.box, h_try, gap_cells, num.cpml_cells
-    )
+    if cfg.geometry == "baffle":
+        count_fn = lambda hh: _baffle_domain_counts(  # noqa: E731
+            cfg.radiator, hh, gap_cells, num.cpml_cells
+        )
+    else:
+        count_fn = lambda hh: _domain_counts(cfg.box, hh, gap_cells, num.cpml_cells)  # noqa: E731
+
+    nbx, nby, nbz, nx, ny, nz, _, _, _ = count_fn(h_try)
     zrad_fallback = False
     if nx * ny * nz > num.cell_budget:
         h = h_from_ppw
@@ -260,9 +294,7 @@ def derive(cfg: Config) -> Derived:
     else:
         h = h_try
 
-    nbx, nby, nbz, nx, ny, nz, rw, rh, rd = _domain_counts(
-        cfg.box, h, gap_cells, num.cpml_cells
-    )
+    nbx, nby, nbz, nx, ny, nz, rw, rh, rd = count_fn(h)
     total_cells = nx * ny * nz
     dt = num.cfl_safety * h / (c * SQRT3)
 
@@ -276,7 +308,10 @@ def derive(cfg: Config) -> Derived:
     sigma = math.sqrt(2.0 * math.log(att)) / (2.0 * math.pi * num.pulse_f_factor * f_max)
     t0 = 6.0 * sigma
 
-    if cfg.box is None:
+    if cfg.geometry == "baffle":
+        z_extent = float(gap_cells + num.cpml_cells) * h
+        max_dim = max(rw, rh, z_extent)
+    elif cfg.box is None:
         max_dim = 0.0
     else:
         max_dim = max(rw, rh, rd)
@@ -284,6 +319,10 @@ def derive(cfg: Config) -> Derived:
     n_steps = max(1, math.ceil(run_time_s / dt))
 
     ppw_realized = lambda_min / h
+    if cfg.geometry == "baffle":
+        cpml_sides = CPML_SIDES_BAFFLE
+    else:
+        cpml_sides = CPML_SIDES_ALL
 
     return Derived(
         f_max=f_max,
@@ -313,6 +352,8 @@ def derive(cfg: Config) -> Derived:
         run_time_s=run_time_s,
         n_steps=n_steps,
         ppw_realized=ppw_realized,
+        cpml_sides=cpml_sides,
+        geometry=cfg.geometry,
     )
 
 
@@ -329,7 +370,10 @@ def validate(
     c = cfg.air.c
     num = cfg.numerics
 
-    if cfg.box is not None:
+    if cfg.geometry == "box" and cfg.box is None:
+        errors.append("geometry=box requires box dimensions in config")
+
+    if cfg.geometry == "box" and cfg.box is not None:
         hx, hy = _radiator_half_extents(cfg.radiator)
         xc, yc = cfg.radiator.x_c, cfg.radiator.y_c
         half_w = cfg.box.W / 2.0
@@ -368,7 +412,10 @@ def validate(
             f"default {_ppw_dispersion_ref:g}"
         )
 
-    if cfg.box is not None:
+    if cfg.geometry == "baffle" and cfg.box is not None:
+        warnings.append("box dimensions ignored in baffle geometry mode")
+
+    if cfg.geometry == "box" and cfg.box is not None:
         dims_mm = (cfg.box.W * 1e3, cfg.box.H * 1e3, cfg.box.D * 1e3)
         for name, val in zip(("W", "H", "D"), dims_mm):
             if val < 10.0 or val > 600.0:

@@ -48,7 +48,8 @@ from fdtd.kernels import (  # noqa: E402
 )
 
 _FLOAT32 = np.dtype(np.float32)
-_CPML_AXIS_X_ONLY = (True, False, False)
+_CPML_SIDES_X_ONLY = (True, True, False, False, False, False)
+_CPML_SIDES_ALL = (True, True, True, True, True, True)
 _PROFILE_F32_ATOL = 3e-6
 
 
@@ -229,12 +230,12 @@ def _grid_aniso(
     return g, d, cfg, d
 
 
-def _step_cpml_axes(
+def _step_cpml_sides(
     fields: Fields,
     coeffs: object,
     slabs: object,
     cpml: CpmlState,
-    axes: tuple[bool, bool, bool],
+    sides: tuple[bool, bool, bool, bool, bool, bool],
 ) -> None:
     nx, ny, nz = fields.p.shape
     zero_rigid_face_velocities(fields.vx, fields.vy, fields.vz)
@@ -251,7 +252,7 @@ def _step_cpml_axes(
         0,
         nz,
     )
-    apply_v(fields, cpml, coeffs, axes=axes)
+    apply_v(fields, cpml, coeffs, sides=sides)
     zero_rigid_face_velocities(fields.vx, fields.vy, fields.vz)
     update_p(
         fields.p,
@@ -266,7 +267,7 @@ def _step_cpml_axes(
         0,
         nz,
     )
-    apply_p(fields, cpml, coeffs, axes=axes)
+    apply_p(fields, cpml, coeffs, sides=sides)
 
 
 def _inactive_cpml_state(c: int) -> CpmlState:
@@ -286,6 +287,53 @@ def _inactive_cpml_state(c: int) -> CpmlState:
 def _assert_fields_match_ulp(a, b, *, maxulp: int = 2) -> None:
     for x, y in zip(a, b):
         np.testing.assert_array_max_ulp(x, y, maxulp=maxulp)
+
+
+def test_all_cpml_sides_matches_pre_side_dispatch_regression():
+    """With all six sides enabled, numba CPML matches NumPy reference (box / free-field default)."""
+    n = 20
+    cpml = 5
+    g, d, cfg, _ = _grid(n, cpml=cpml)
+    coeffs = make_update_coeffs(cfg.air.rho, cfg.air.c, d.h, d.dt)
+    cpml_st = make_cpml_state(g, cfg, d, d.dt)
+    assert cpml_st.sides == _CPML_SIDES_ALL
+    slabs = g.cpml_slabs
+
+    f_nb = allocate_fields(g)
+    f_np = allocate_fields(g)
+    rng = np.random.default_rng(91)
+    for arr in (f_nb.p, f_nb.vx, f_nb.vy, f_nb.vz):
+        arr[...] = rng.uniform(-0.05, 0.05, size=arr.shape).astype(_FLOAT32)
+    f_np.p[...], f_np.vx[...], f_np.vy[...], f_np.vz[...] = (
+        f_nb.p,
+        f_nb.vx,
+        f_nb.vy,
+        f_nb.vz,
+    )
+
+    nx, ny, nz = f_nb.p.shape
+    zero_rigid_face_velocities(f_nb.vx, f_nb.vy, f_nb.vz)
+    update_v(f_nb.p, f_nb.vx, f_nb.vy, f_nb.vz, coeffs.cv, 0, nx, 0, ny, 0, nz)
+    apply_v(f_nb, cpml_st, coeffs, sides=_CPML_SIDES_ALL)
+    zero_rigid_face_velocities(f_nb.vx, f_nb.vy, f_nb.vz)
+    update_p(f_nb.p, f_nb.vx, f_nb.vy, f_nb.vz, coeffs.cp, 0, nx, 0, ny, 0, nz)
+    apply_p(f_nb, cpml_st, coeffs, sides=_CPML_SIDES_ALL)
+
+    p, vx, vy, vz = f_np.p, f_np.vx, f_np.vy, f_np.vz
+    from fdtd.cpml import apply_v_numpy, apply_p_numpy
+
+    zero_rigid_face_velocities(vx, vy, vz)
+    update_v(p, vx, vy, vz, coeffs.cv, 0, nx, 0, ny, 0, nz)
+    apply_v_numpy(p, vx, vy, vz, f_np, coeffs, cpml_st, sides=_CPML_SIDES_ALL)
+    zero_rigid_face_velocities(vx, vy, vz)
+    update_p(p, vx, vy, vz, coeffs.cp, 0, nx, 0, ny, 0, nz)
+    apply_p_numpy(p, vx, vy, vz, f_np, coeffs, cpml_st, sides=_CPML_SIDES_ALL)
+
+    _assert_fields_match_ulp(
+        (f_nb.p, f_nb.vx, f_nb.vy, f_nb.vz),
+        (f_np.p, f_np.vx, f_np.vy, f_np.vz),
+        maxulp=4,
+    )
 
 
 def test_null_cpml_matches_plain_step():
@@ -932,7 +980,7 @@ def _duct_reflection_spectrum(
 
     hist: list[float] = []
     for _ in range(n_steps):
-        _step_cpml_axes(f, coeffs, slabs, cpml_st, _CPML_AXIS_X_ONLY)
+        _step_cpml_sides(f, coeffs, slabs, cpml_st, _CPML_SIDES_X_ONLY)
         hist.append(float(f.p[i_rec, ny // 2, nz // 2]))
 
     trace = np.asarray(hist, dtype=np.float64)

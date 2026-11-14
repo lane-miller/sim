@@ -30,6 +30,12 @@ def velocity_pulse(t: float, sigma: float, t0: float) -> float:
     return math.exp(-0.5 * z * z)
 
 
+def velocity_pulse_derivative(t: float, sigma: float, t0: float) -> float:
+    """Time derivative of :func:`velocity_pulse` (analytic Gaussian)."""
+    z = (t - float(t0)) / float(sigma)
+    return float(velocity_pulse(t, sigma, t0) * (-z / float(sigma)))
+
+
 def pulse_spectrum(
     f: np.ndarray | float,
     sigma: float,
@@ -130,10 +136,12 @@ class BoxBoundary:
         *,
         drive_enabled: bool = True,
     ) -> BoxBoundary:
-        if grid.cfg.box is None:
-            raise ValueError("BoxBoundary requires cfg.box")
+        if grid.cfg.geometry not in ("box", "baffle"):
+            raise ValueError("BoxBoundary requires box or baffle geometry")
+        if grid.cfg.geometry == "box" and grid.cfg.box is None:
+            raise ValueError("BoxBoundary requires cfg.box in box geometry mode")
         if grid.rigid_vx is None or grid.radiator_face_indices is None:
-            raise ValueError("grid has no box geometry")
+            raise ValueError("grid has no box/baffle geometry")
         if grid.k_face_z is None:
             raise ValueError("grid has no k_face_z")
 

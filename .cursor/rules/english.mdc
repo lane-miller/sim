@@ -2,3 +2,4 @@
 alwaysApply: true
 ---
 Always reply in US English.
+Never run code, tests, or git commands; only read and write files.

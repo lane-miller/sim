@@ -16,6 +16,7 @@ from fdtd.post.kirchhoff import (  # noqa: E402
     far_field_at_radius,
     face_p_from_cells,
     huygens_box_patches,
+    huygens_open_patches,
     kh_far_field,
     kh_pressure,
     kh_pressure_loop,
@@ -350,6 +351,49 @@ def _huygens_kh_errors(
     return p_kh, ff_err, p_fdtd
 
 
+def test_far_field_matches_kh_pressure_on_axis_large_r() -> None:
+    """Fraunhofer ``kh_far_field`` agrees with full ``kh_pressure`` at large r."""
+    h = H_PATCH
+    patches = huygens_box_patches(L_BOX, L_BOX, L_BOX, h, ORIGIN, offset_cells=2)
+    k = np.array([2.0 * math.pi * 400.0 / C], dtype=_F64)
+    p = np.ones((1, patches.centers.shape[0]), dtype=np.complex128) * (1.0 + 0.0j)
+    dpdn = np.zeros_like(p)
+    r = 80.0 * L_BOX
+    pt = np.array([[0.0, 0.0, r]], dtype=_F64)
+    p_full = kh_pressure(pt, patches, p, dpdn, k, near_subdivide=False)[0, 0]
+    ff = kh_far_field(
+        np.array([[0.0, 0.0, 1.0]], dtype=_F64), patches, p, dpdn, k
+    )[0, 0]
+    p_ff = far_field_at_radius(np.array([[ff]], dtype=_C128), k, R_ref=r)[0, 0]
+    rel = abs(p_ff - p_full) / max(abs(p_full), 1e-30)
+    assert rel < 0.05
+
+
+def test_image_normals_flip_z() -> None:
+    from fdtd.post.kirchhoff import _reflect_normals_z
+
+    n = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=_F64)
+    n_img = _reflect_normals_z(n, 0.0)
+    assert abs(n_img[0, 2]) < 1e-15
+    assert abs(n_img[1, 2] + 1.0) < 1e-15
+
+
+def test_huygens_open_patches_baffle_extent() -> None:
+    """Open Huygens box: no −z face, side centers start at z = h/2 above the baffle."""
+    h = H_PATCH
+    offset = 3
+    patches = huygens_open_patches(0.04, 0.04, 0.0, h, (0.0, 0.0, 0.0), offset_cells=offset)
+    assert np.all(patches.centers[:, 2] > 0.0)
+    normals = patches.normals
+    keys: set[tuple[int, int]] = set()
+    for row in normals:
+        axis = int(np.argmax(np.abs(row)))
+        keys.add((axis, int(np.sign(row[axis]))))
+    assert len(keys) == 5
+    assert (2, -1) not in keys
+    assert abs(patches.centers[:, 2].min() - 0.5 * h) < 1e-15
+
+
 def test_huygens_surface_emulation() -> None:
     """KH on offset Huygens surface with cubic face p (order 4) and analytic v_n."""
     offset = 2
@@ -427,6 +471,32 @@ def test_dtypes_complex128() -> None:
     assert amp.dtype == _C128
     p1m = far_field_at_radius(amp, K)
     assert p1m.dtype == _C128
+
+
+def test_kh_monopole_rigid_plane_image() -> None:
+    """Rigid-plane image Green's function matches direct + reflected monopole."""
+    from fdtd.post.kirchhoff import _green, _reflect_points
+
+    kf = K[0]
+    src = np.array([0.0, 0.0, 0.05], dtype=_F64)
+    obs = np.array([0.12, -0.04, 0.11], dtype=_F64)
+    plane_z = 0.0
+    y = src.reshape(1, 3)
+    rdx = obs.reshape(1, 1, 3) - y.reshape(1, 1, 3)
+    R = np.linalg.norm(rdx, axis=-1)
+    G0 = _green(kf, R)[0, 0]
+    y_img = _reflect_points(y, plane_z)
+    rdx_i = obs.reshape(1, 1, 3) - y_img.reshape(1, 1, 3)
+    G1 = _green(kf, np.linalg.norm(rdx_i, axis=-1))[0, 0]
+    coeff = _coeff(np.array([FREQS[0]]))[0]
+    src_img = src.copy()
+    src_img[2] = -src[2]
+    p_ref = _monopole_p(obs.reshape(1, 3), kf, coeff, source=src)[0] + _monopole_p(
+        obs.reshape(1, 3), kf, coeff, source=src_img
+    )[0]
+    p_ker = coeff * (4.0 * math.pi) * (G0 + G1)
+    err = abs(p_ker - p_ref) / max(abs(p_ref), 1e-30)
+    assert err < 1e-3, f"image Green rel err {err:.4e}"
 
 
 def test_dpdn_from_vn_export() -> None:

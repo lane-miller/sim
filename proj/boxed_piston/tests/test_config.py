@@ -109,17 +109,36 @@ def test_json_roundtrip():
     assert d2.n_steps == d1.n_steps
 
 
-def test_free_field_derives_without_error():
+def test_baffle_derives_without_box():
     cfg = Config(
+        geometry="baffle",
         box=None,
-        radiator=Radiator("circle", dims=[0.05]),
-        band=Band(f_min=20.0),
-        output=Output(path="/tmp/free.h5"),
+        radiator=Radiator("circle", dims=[0.1]),
+        band=Band(f_min=100.0, f_max=6000.0),
+        output=Output(path="/tmp/baffle.h5"),
     )
     d = derive(cfg)
+    assert d.geometry == "baffle"
+    from fdtd.config import CPML_SIDES_BAFFLE
+
+    assert d.cpml_sides == CPML_SIDES_BAFFLE
+    assert d.box_nz == 0
     assert d.total_cells > 0
     errors, _ = validate(cfg, d)
     assert not errors
+
+
+def test_box_mode_derive_unchanged_smoke():
+    """Regression guard: box geometry derive must stay bit-identical to pre-C6."""
+    cfg = Config.from_json((CONFIGS / "smoke.json").read_text(encoding="utf-8"))
+    d = derive(cfg)
+    assert (d.nx, d.ny, d.nz) == (44, 44, 42)
+    assert d.n_steps == 149
+    assert d.h == pytest.approx(0.005, rel=1e-6)
+    assert d.geometry == "box"
+    from fdtd.config import CPML_SIDES_ALL
+
+    assert d.cpml_sides == CPML_SIDES_ALL
 
 
 def test_default_json_matches_config_defaults():

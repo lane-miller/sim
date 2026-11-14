@@ -17,9 +17,9 @@ sys.path.insert(0, str(ROOT))
 h5py = pytest.importorskip("h5py")
 
 from fdtd.config import Air, Band, Box, Config, Numerics, Output, Radiator, derive  # noqa: E402
+from fdtd.post.spectra import spectrum  # noqa: E402
 from fdtd.post.zrad import zrad_from_h5  # noqa: E402
-from fdtd.recorder import velocity_pulse_derivative  # noqa: E402
-from fdtd.source import pulse_spectrum, velocity_pulse  # noqa: E402
+from fdtd.source import velocity_pulse, velocity_pulse_derivative  # noqa: E402
 
 
 def _write_synthetic_h5(path: Path, p_avg: np.ndarray, cfg: Config, derived) -> None:
@@ -56,8 +56,11 @@ def _base_cfg() -> Config:
     )
 
 
-def _in_band_mask(freqs: np.ndarray, *, dt: float, sigma: float, t0: float) -> np.ndarray:
-    v_spec = pulse_spectrum(freqs, sigma, t0)
+def _in_band_mask(
+    freqs: np.ndarray, *, times: np.ndarray, sigma: float, t0: float
+) -> np.ndarray:
+    v_time = np.array([velocity_pulse(float(t), sigma, t0) for t in times], dtype=np.float64)
+    v_spec = np.asarray(spectrum(v_time, times, freqs), dtype=np.complex128)
     mag = np.abs(v_spec)
     pk = float(np.max(mag))
     floor = pk * 10.0 ** (-40.0 / 20.0)
@@ -78,7 +81,7 @@ def test_zrad_constant_impedance():
         path = Path(tmp) / "syn.h5"
         _write_synthetic_h5(path, p_avg, cfg, d)
         freqs, z = zrad_from_h5(path, df_hz=0.5)
-        mask = _in_band_mask(freqs, dt=d.dt, sigma=d.pulse_sigma, t0=d.pulse_t0)
+        mask = _in_band_mask(freqs, times=times, sigma=d.pulse_sigma, t0=d.pulse_t0)
         rel = np.abs(z[mask] - z0) / z0
         assert np.all(rel < 1e-6)
 
@@ -102,7 +105,7 @@ def test_zrad_derivative_impedance():
         path = Path(tmp) / "syn.h5"
         _write_synthetic_h5(path, p_avg, cfg, d)
         freqs, z = zrad_from_h5(path, df_hz=0.5)
-        mask = _in_band_mask(freqs, dt=d.dt, sigma=d.pulse_sigma, t0=d.pulse_t0)
+        mask = _in_band_mask(freqs, times=times, sigma=d.pulse_sigma, t0=d.pulse_t0)
         k = 2.0 * np.pi * freqs[mask] / c
         z_ref = 1j * k * L
         rel = np.abs(z[mask] - z_ref) / np.max(np.abs(z_ref))
@@ -125,7 +128,7 @@ def test_zrad_time_shift_phase():
         _write_synthetic_h5(path, p_avg, cfg, d)
         f0, z0_spec = zrad_from_h5(path, df_hz=1.0, time_shift_s=0.0)
         _, z1_spec = zrad_from_h5(path, df_hz=1.0, time_shift_s=shift)
-        mask = _in_band_mask(f0, dt=d.dt, sigma=d.pulse_sigma, t0=d.pulse_t0)
+        mask = _in_band_mask(f0, times=times, sigma=d.pulse_sigma, t0=d.pulse_t0)
         omega = 2.0 * np.pi * f0[mask]
         expected = z0_spec[mask] * np.exp(1j * omega * shift)
         rel = np.abs(z1_spec[mask] - expected) / np.maximum(np.abs(expected), 1e-30)

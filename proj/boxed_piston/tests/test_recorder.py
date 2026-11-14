@@ -29,11 +29,15 @@ from fdtd.config import (  # noqa: E402
     derive,
 )
 from fdtd.grid import Grid, allocate_fields  # noqa: E402
-from fdtd.post.kirchhoff import face_p_from_cells  # noqa: E402
+from fdtd.post.kirchhoff import face_p_from_cells, huygens_open_patches  # noqa: E402
 from fdtd.recorder import (  # noqa: E402
     Recorder,
+    _geometry_origin,
+    _huygens_depth,
     decimation_factor,
+    resolve_huygens_offset,
     validate_huygens_clearance,
+    validate_huygens_patches_interior,
 )
 from fdtd.source import BoxBoundary, velocity_pulse  # noqa: E402
 from fdtd.run import run  # noqa: E402
@@ -206,6 +210,93 @@ def test_huygens_p_matches_face_p_from_cells_cubic():
         if hasattr(ref, "item"):
             ref = ref.item()
         assert est[q] == pytest.approx(ref, rel=0, abs=1e-4)
+
+
+def _small_baffle_problem(
+    *,
+    gap_cells: int = 8,
+    f_max: float = 4_000.0,
+) -> tuple[Config, Derived, Grid, BoxBoundary]:
+    cfg = Config(
+        geometry="baffle",
+        box=None,
+        radiator=Radiator("circle", dims=[0.03], x_c=0.0, y_c=0.0),
+        band=Band(f_min=20.0, f_max=f_max),
+        numerics=Numerics(
+            gap_cells=gap_cells,
+            cpml_cells=6,
+            ppw=8.0,
+            cells_across_radiator=6,
+            cell_budget=10**9,
+            cfl_safety=0.99,
+            n_transits=0.05,
+        ),
+        output=Output(path="/tmp/recorder_baffle_test.h5"),
+    )
+    d = derive(cfg)
+    _sync_dt(cfg, d)
+    g = Grid(cfg, d, radiator_supersample=8)
+    boundary = BoxBoundary.from_grid(g, d)
+    return cfg, d, g, boundary
+
+
+def _huygens_face_keys(normals: np.ndarray) -> set[tuple[int, int]]:
+    keys: set[tuple[int, int]] = set()
+    for row in normals:
+        axis = int(np.argmax(np.abs(row)))
+        keys.add((axis, int(np.sign(row[axis]))))
+    return keys
+
+
+def test_baffle_huygens_open_surface_tiny_grid():
+    """Baffle Huygens surface is five faces from z = baffle with no sub-baffle patches."""
+    cfg, d, g, boundary = _small_baffle_problem()
+    offset = resolve_huygens_offset(cfg)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "baffle_huygens.h5"
+        Recorder(cfg, d, g, boundary, path, offset_cells=offset).close()
+        with h5py.File(path, "r") as f:
+            centers = np.asarray(f["huygens/centers"][()], dtype=np.float64)
+            normals = np.asarray(f["huygens/normals"][()], dtype=np.float64)
+            assert np.all(centers[:, 2] > 0.0)
+            assert len(_huygens_face_keys(normals)) == 5
+            assert (2, -1) not in _huygens_face_keys(normals)
+
+
+def test_baffle_huygens_deep_top_rejects_cpml():
+    """Gap-sized D (legacy bug) places the Huygens top inside +z CPML."""
+    cfg, d, g, boundary = _small_baffle_problem(gap_cells=10)
+    origin = _geometry_origin(g)
+    offset = resolve_huygens_offset(cfg)
+    bad = huygens_open_patches(
+        g.realized_W,
+        g.realized_H,
+        float(d.gap_cells) * g.h,
+        g.h,
+        origin,
+        offset_cells=offset,
+    )
+    with pytest.raises(ValueError, match="outside non-CPML"):
+        validate_huygens_patches_interior(g, bad)
+
+
+def test_baffle_huygens_depth_zero_top_at_offset():
+    cfg, d, g, boundary = _small_baffle_problem()
+    assert _huygens_depth(g, d) == 0.0
+    offset = resolve_huygens_offset(cfg)
+    origin = _geometry_origin(g)
+    patches = huygens_open_patches(
+        g.realized_W,
+        g.realized_H,
+        _huygens_depth(g, d),
+        g.h,
+        origin,
+        offset_cells=offset,
+    )
+    validate_huygens_patches_interior(g, patches)
+    top_z = float(np.max(patches.centers[:, 2]))
+    assert top_z == pytest.approx(offset * g.h, rel=0, abs=1e-12)
 
 
 def test_huygens_clearance_validation():

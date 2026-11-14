@@ -12,8 +12,17 @@ import numpy as np
 
 from fdtd.config import Config, Derived
 from fdtd.grid import Fields, Grid
-from fdtd.post.kirchhoff import box_surface_patches, huygens_box_patches
-from fdtd.source import BoxBoundary, velocity_at_half_step, velocity_pulse
+from fdtd.post.kirchhoff import (
+    box_surface_patches,
+    huygens_box_patches,
+    huygens_open_patches,
+)
+from fdtd.source import (
+    BoxBoundary,
+    velocity_at_half_step,
+    velocity_pulse,
+    velocity_pulse_derivative,
+)
 
 try:
     import h5py
@@ -36,12 +45,6 @@ def decimation_factor(f_max: float, dt: float) -> int:
     return max(1, int(math.floor(1.0 / (2.5 * float(f_max) * float(dt)))))
 
 
-def velocity_pulse_derivative(t: float, sigma: float, t0: float) -> float:
-    """Time derivative of :func:`fdtd.source.velocity_pulse` (analytic Gaussian)."""
-    z = (t - float(t0)) / float(sigma)
-    return float(velocity_pulse(t, sigma, t0) * (-z / float(sigma)))
-
-
 def resolve_huygens_offset(cfg: Config) -> int:
     """Huygens surface offset in cells (config override with default 3)."""
     num = cfg.numerics
@@ -49,18 +52,58 @@ def resolve_huygens_offset(cfg: Config) -> int:
     return _DEFAULT_HUYGENS_OFFSET_CELLS if val is None else int(val)
 
 
-def validate_huygens_clearance(derived: Derived, offset_cells: int) -> None:
-    """Raise ``ValueError`` if Huygens offset is too small or enters the CPML."""
+def validate_huygens_clearance(
+    derived: Derived,
+    offset_cells: int,
+    *,
+    geometry: str = "box",
+) -> None:
+    """Raise ``ValueError`` if Huygens offset is too small or enters the CPML.
+
+    Box mode: outer Huygens faces sit ``offset_cells`` into the gap beyond the
+    rigid box. Baffle mode: lateral faces match box mode; the top face is at
+    ``offset_cells·h`` above the baffle (``D = 0`` in :func:`huygens_open_patches`).
+    In both cases the top/outward stencil must stay ``≥ 2`` cells inside the
+    CPML inner edge, so require ``gap_cells − offset_cells ≥ 2``.
+    """
     if offset_cells < 2:
         raise ValueError(
             f"huygens offset {offset_cells} cells < 2 (stencil needs two p cells each side)"
         )
     clearance = derived.gap_cells - offset_cells
     if clearance < 2:
+        mode = "baffle" if geometry == "baffle" else "box"
         raise ValueError(
             f"huygens offset {offset_cells} leaves {clearance} cells to CPML/gap "
-            f"(need ≥ 2; gap_cells={derived.gap_cells})"
+            f"(need ≥ 2; gap_cells={derived.gap_cells}, geometry={mode})"
         )
+
+
+def validate_huygens_patches_interior(grid: Grid, patches) -> None:
+    """Raise ``ValueError`` if any Huygens face sample lies in CPML or outside the grid."""
+    if grid.i_box is None or grid.j_box is None or grid.k_box is None:
+        raise ValueError("grid has no geometry origin indices")
+    slabs = grid.cpml_slabs
+    i0, i1 = slabs.i_inner.lo, slabs.i_inner.hi
+    j0, j1 = slabs.j_inner.lo, slabs.j_inner.hi
+    k0, k1 = slabs.k_inner.lo, slabs.k_inner.hi
+    ib, jb, kb = grid.i_box, grid.j_box, grid.k_box
+    h = grid.h
+    n_p = patches.centers.shape[0]
+    for q in range(n_p):
+        center = patches.centers[q]
+        n_hat = patches.normals[q]
+        n_u = n_hat / max(float(np.linalg.norm(n_hat)), 1e-30)
+        for mul in (-1.5, -0.5, 0.5, 1.5):
+            pos = center + mul * h * n_u
+            i, j, k = _p_index_from_xyz(
+                grid, float(pos[0]), float(pos[1]), float(pos[2]), ib=ib, jb=jb, kb=kb
+            )
+            if not (i0 <= i < i1 and j0 <= j < j1 and k0 <= k < k1):
+                raise ValueError(
+                    f"Huygens patch {q} order-4 stencil at p index ({i},{j},{k}) "
+                    f"outside non-CPML interior (i∈[{i0},{i1}), j∈[{j0},{j1}), k∈[{k0},{k1}))"
+                )
 
 
 def _require_h5py() -> Any:
@@ -71,15 +114,61 @@ def _require_h5py() -> Any:
     return h5py
 
 
-def _box_origin(grid: Grid) -> tuple[float, float, float]:
+def _geometry_origin(grid: Grid) -> tuple[float, float, float]:
     cfg = grid.cfg
     xc = float(cfg.radiator.x_c)
     yc = float(cfg.radiator.y_c)
+    if cfg.geometry == "baffle":
+        return (
+            -xc - 0.5 * grid.realized_W,
+            -yc - 0.5 * grid.realized_H,
+            0.0,
+        )
     return (
         -xc - 0.5 * grid.realized_W,
         -yc - 0.5 * grid.realized_H,
         -grid.realized_D,
     )
+
+
+def _huygens_depth(grid: Grid, derived: Derived) -> float:
+    if grid.cfg.geometry == "baffle":
+        return 0.0
+    return grid.realized_D
+
+
+def _resolve_probe_targets(cfg: Config, grid: Grid) -> list[tuple[float, float, float]]:
+    """Physical probe targets (m) from ``Output.probes`` and optional baffle z cell list."""
+    targets: list[tuple[float, float, float]] = []
+    out = cfg.output
+    if out.probes:
+        for row in out.probes:
+            if len(row) != 3:
+                raise ValueError(f"output.probes entries must be [x,y,z], got {row!r}")
+            targets.append((float(row[0]), float(row[1]), float(row[2])))
+    if cfg.geometry == "baffle" and out.probes_baffle_z_cells:
+        h = grid.h
+        xc = float(cfg.radiator.x_c)
+        yc = float(cfg.radiator.y_c)
+        for k in out.probes_baffle_z_cells:
+            targets.append((xc, yc, (int(k) + 0.5) * h))
+    return targets
+
+
+def _probe_indices(grid: Grid, targets: list[tuple[float, float, float]]) -> tuple[np.ndarray, np.ndarray]:
+    """Nearest pressure cell center for each target (documented probe rule).
+
+    Returns flat ``p`` indices and actual sample coordinates (N, 3).
+    """
+    n = len(targets)
+    idx = np.empty(n, dtype=np.int64)
+    centers = np.empty((n, 3), dtype=_F64)
+    shape = (grid.nx, grid.ny, grid.nz)
+    for q, (x, y, z) in enumerate(targets):
+        i, j, k = grid.index_of(x, y, z)
+        idx[q] = int(np.ravel_multi_index((i, j, k), shape))
+        centers[q, 0], centers[q, 1], centers[q, 2] = grid.coords_of(i, j, k)
+    return idx, centers
 
 
 def _p_index_from_xyz(
@@ -92,7 +181,7 @@ def _p_index_from_xyz(
     jb: int,
     kb: int,
 ) -> tuple[int, int, int]:
-    ox, oy, oz = _box_origin(grid)
+    ox, oy, oz = _geometry_origin(grid)
     h = grid.h
     i = ib + int(round((float(x) - ox) / h - 0.5))
     j = jb + int(round((float(y) - oy) / h - 0.5))
@@ -117,7 +206,7 @@ def _v_index_from_normal(
     kb: int,
 ) -> tuple[int, float]:
     """Flat staggered velocity index and sign so v_n is positive outward."""
-    ox, oy, oz = _box_origin(grid)
+    ox, oy, oz = _geometry_origin(grid)
     h = grid.h
     n = normal / max(np.linalg.norm(normal), 1e-30)
     axis = int(np.argmax(np.abs(n)))
@@ -211,7 +300,7 @@ def _build_box_surface_gathers(
         grid.realized_H,
         grid.realized_D,
         grid.h,
-        _box_origin(grid),
+        _geometry_origin(grid),
     )
     n = patches.centers.shape[0]
     n_rad = boundary.idx_radiator.size
@@ -294,12 +383,15 @@ class Recorder:
         buffer_samples: int = _BUFFER_SAMPLES,
     ) -> None:
         h5 = _require_h5py()
-        if grid.cfg.box is None:
-            raise ValueError("Recorder requires a box geometry")
+        if cfg.geometry not in ("box", "baffle"):
+            raise ValueError("Recorder requires box or baffle geometry")
+        if cfg.geometry == "box" and grid.cfg.box is None:
+            raise ValueError("Recorder requires cfg.box in box geometry mode")
         offset = resolve_huygens_offset(cfg) if offset_cells is None else int(offset_cells)
-        validate_huygens_clearance(derived, offset)
+        validate_huygens_clearance(derived, offset, geometry=cfg.geometry)
 
         self.cfg = cfg
+        self._is_baffle = cfg.geometry == "baffle"
         self.derived = derived
         self.grid = grid
         self.boundary = boundary
@@ -314,26 +406,44 @@ class Recorder:
 
         assert grid.i_box is not None and grid.j_box is not None and grid.k_box is not None
         ib, jb, kb = grid.i_box, grid.j_box, grid.k_box
-        origin = _box_origin(grid)
-        huygens_patches = huygens_box_patches(
-            grid.realized_W,
-            grid.realized_H,
-            grid.realized_D,
-            grid.h,
-            origin,
-            offset_cells=offset,
-        )
+        origin = _geometry_origin(grid)
+        depth = _huygens_depth(grid, derived)
+        if self._is_baffle:
+            huygens_patches = huygens_open_patches(
+                grid.realized_W,
+                grid.realized_H,
+                depth,
+                grid.h,
+                origin,
+                offset_cells=offset,
+            )
+        else:
+            huygens_patches = huygens_box_patches(
+                grid.realized_W,
+                grid.realized_H,
+                grid.realized_D,
+                grid.h,
+                origin,
+                offset_cells=offset,
+            )
         (
             self._huygens_idx4,
             self._huygens_iv,
             self._huygens_vsgn,
             self._huygens_vaxis,
         ) = _build_huygens_gathers(grid, huygens_patches, ib=ib, jb=jb, kb=kb)
-        box_patches, self._box_idx_p, self._box_rad_local = _build_box_surface_gathers(
-            grid, boundary
-        )
+        validate_huygens_patches_interior(grid, huygens_patches)
+        if self._is_baffle:
+            box_patches = None
+            self._box_idx_p = np.empty(0, dtype=np.int64)
+            self._box_rad_local = np.empty(0, dtype=np.int64)
+            self._n_box = 0
+        else:
+            box_patches, self._box_idx_p, self._box_rad_local = _build_box_surface_gathers(
+                grid, boundary
+            )
+            self._n_box = box_patches.centers.shape[0]
         self._n_huy = self._huygens_idx4.shape[0]
-        self._n_box = box_patches.centers.shape[0]
 
         self._rad_p_idx = np.empty(boundary.idx_radiator.size, dtype=np.int64)
         if boundary.idx_radiator.size:
@@ -345,6 +455,17 @@ class Recorder:
             )
         self._rad_w = boundary.w_radiator.astype(_F64)
         self._rad_w_sum = float(np.sum(self._rad_w)) if self._rad_w.size else 1.0
+
+        probe_targets = _resolve_probe_targets(cfg, grid)
+        self._n_probes = len(probe_targets)
+        self._probe_requested = (
+            np.asarray(probe_targets, dtype=_F64) if probe_targets else np.empty((0, 3), _F64)
+        )
+        if self._n_probes:
+            self._probe_idx, self._probe_centers = _probe_indices(grid, probe_targets)
+        else:
+            self._probe_idx = np.empty(0, dtype=np.int64)
+            self._probe_centers = np.empty((0, 3), dtype=_F64)
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -373,8 +494,11 @@ class Recorder:
             self._w_h_vn.max_buffer_bytes,
             self._w_h_tp.max_buffer_bytes,
             self._w_h_tvn.max_buffer_bytes,
-            self._w_b_p.max_buffer_bytes,
-            self._w_b_t.max_buffer_bytes,
+            *(
+                w.max_buffer_bytes
+                for w in (self._w_b_p, self._w_b_t)
+                if w is not None
+            ),
         ]
         return int(sum(parts))
 
@@ -412,14 +536,25 @@ class Recorder:
         huy.attrs["p_times"] = "t_p = (n+1)·Δt at decimated steps n ≡ 0 (mod M)"
         huy.attrs["vn_times"] = "t_v = (n+½)·Δt at decimated steps n ≡ 0 (mod M)"
 
-        box = self._file.create_group("box_surface")
-        for name, arr in (
-            ("centers", box_patches.centers),
-            ("normals", box_patches.normals),
-            ("areas", box_patches.areas),
-        ):
-            box.create_dataset(name, data=arr.astype(_F64), compression="gzip")
-        box.attrs["p_times"] = "t_p = (n+1)·Δt, decimated n ≡ 0 (mod M)"
+        if self._n_probes:
+            pr = self._file.create_group("probes")
+            pr.attrs["sampling"] = (
+                "nearest pressure cell center to requested (x,y,z); "
+                "p at time level (n+1)Δt after step(n)"
+            )
+            pr.create_dataset("requested", data=self._probe_requested, compression="gzip")
+            pr.create_dataset("centers", data=self._probe_centers, compression="gzip")
+
+        if not self._is_baffle and box_patches is not None:
+            box = self._file.create_group("box_surface")
+            for name, arr in (
+                ("centers", box_patches.centers),
+                ("normals", box_patches.normals),
+                ("areas", box_patches.areas),
+            ):
+                box.create_dataset(name, data=arr.astype(_F64), compression="gzip")
+            box.attrs["p_times"] = "t_p = (n+1)·Δt, decimated n ≡ 0 (mod M)"
+        meta.attrs["geometry"] = self.cfg.geometry
         meta.attrs["time_after_step_n"] = (
             "sample() is called after step(n); fields.p is p^{n+1}, staggered v is v^{n+½}"
         )
@@ -460,10 +595,23 @@ class Recorder:
         self._ds_h_tp = self._create_extensible(huy, "times_p", (), _F64, buf)
         self._ds_h_tvn = self._create_extensible(huy, "times_vn", (), _F64, buf)
 
-        box = self._file["box_surface"]
-        nb = self._n_box
-        self._ds_b_p = self._create_extensible(box, "p", (nb,), _F32, buf)
-        self._ds_b_t = self._create_extensible(box, "times", (), _F64, buf)
+        if self._n_box:
+            box = self._file["box_surface"]
+            nb = self._n_box
+            self._ds_b_p = self._create_extensible(box, "p", (nb,), _F32, buf)
+            self._ds_b_t = self._create_extensible(box, "times", (), _F64, buf)
+        else:
+            self._ds_b_p = None
+            self._ds_b_t = None
+
+        if self._n_probes:
+            pr = self._file["probes"]
+            np_ = self._n_probes
+            self._ds_pr_p = self._create_extensible(pr, "p", (np_,), _F32, buf)
+            self._ds_pr_tp = self._create_extensible(pr, "times_p", (), _F64, buf)
+        else:
+            self._ds_pr_p = None
+            self._ds_pr_tp = None
 
         self._w_v_int = _ChunkWriter(self._ds_v_int, buf)
         self._w_v_half = _ChunkWriter(self._ds_v_half, buf)
@@ -474,8 +622,18 @@ class Recorder:
         self._w_h_vn = _ChunkWriter(self._ds_h_vn, buf)
         self._w_h_tp = _ChunkWriter(self._ds_h_tp, buf)
         self._w_h_tvn = _ChunkWriter(self._ds_h_tvn, buf)
-        self._w_b_p = _ChunkWriter(self._ds_b_p, buf)
-        self._w_b_t = _ChunkWriter(self._ds_b_t, buf)
+        if self._ds_b_p is not None and self._ds_b_t is not None:
+            self._w_b_p = _ChunkWriter(self._ds_b_p, buf)
+            self._w_b_t = _ChunkWriter(self._ds_b_t, buf)
+        else:
+            self._w_b_p = None
+            self._w_b_t = None
+        if self._ds_pr_p is not None and self._ds_pr_tp is not None:
+            self._w_pr_p = _ChunkWriter(self._ds_pr_p, buf)
+            self._w_pr_tp = _ChunkWriter(self._ds_pr_tp, buf)
+        else:
+            self._w_pr_p = None
+            self._w_pr_tp = None
 
     def _time_p_after_step(self, n: int) -> float:
         """Pressure time level after :func:`fdtd.kernels.step` with index *n*."""
@@ -550,8 +708,12 @@ class Recorder:
             )
             self._w_h_tp.append(t_p)
             self._w_h_tvn.append(t_v)
-            self._w_b_p.append(self._box_surface_p(p_flat, n))
-            self._w_b_t.append(t_p)
+            if self._w_b_p is not None and self._w_b_t is not None:
+                self._w_b_p.append(self._box_surface_p(p_flat, n))
+                self._w_b_t.append(t_p)
+            if self._w_pr_p is not None and self._w_pr_tp is not None:
+                self._w_pr_p.append(p_flat[self._probe_idx].astype(_F32))
+                self._w_pr_tp.append(t_p)
 
         self._step += 1
 
@@ -566,8 +728,11 @@ class Recorder:
             self._w_h_vn,
             self._w_h_tp,
             self._w_h_tvn,
-            self._w_b_p,
-            self._w_b_t,
+            *(
+                w
+                for w in (self._w_b_p, self._w_b_t, self._w_pr_p, self._w_pr_tp)
+                if w is not None
+            ),
         ):
             w.close()
         n_full = self._step
