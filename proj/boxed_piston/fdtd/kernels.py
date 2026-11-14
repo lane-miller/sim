@@ -278,18 +278,25 @@ def step(
     coeffs: UpdateCoeffs,
     slabs: CpmlSlabs,
     cpml: object | None = None,
+    boundary: object | None = None,
+    n: int = 0,
 ) -> None:
     """One FDTD leapfrog sub-step on the full grid (CPML slabs use plain derivatives).
 
     Time staggering (brief §2): pressure *p* is at integer time indices *n*,
     velocity *v* at half steps *n+½*. One call does
 
-    1. ``update_v`` — advance ``v^{n-½} → v^{n+½}`` using ``p^n``
-    2. optional ``cpml.apply_v`` — convolutional corrections in CPML slabs
-    3. ``update_p`` — advance ``p^n → p^{n+1}`` using ``v^{n+½}``
-    4. optional ``cpml.apply_p`` — CPML corrections on pressure update
+    1. ``zero_rigid_face_velocities`` — outer domain faces ``v_n = 0``
+    2. ``update_v`` — advance ``v^{n-½} → v^{n+½}`` using ``p^n``
+    3. optional ``cpml.apply_v`` — convolutional corrections in CPML slabs
+    4. ``zero_rigid_face_velocities`` again on outer faces
+    5. optional :class:`fdtd.source.BoxBoundary` — rigid box faces, then radiator
+       ``v_n = w · velocity_pulse((n + ½) Δt)`` (after step 4, before *p* update)
+    6. ``update_p`` — advance ``p^n → p^{n+1}`` using ``v^{n+½}``
+    7. optional ``cpml.apply_p`` — CPML corrections on pressure update
 
     Pass ``cpml=None`` (default) to skip absorber corrections.
+    Pass ``boundary=None`` (default) for free-field / Stage A behavior.
     """
     i_lo, i_hi, j_lo, j_hi, k_lo, k_hi = _domain_args(fields.p)
     zero_rigid_face_velocities(fields.vx, fields.vy, fields.vz)
@@ -311,6 +318,8 @@ def step(
 
         cpml_apply_v(fields, cpml, coeffs)
     zero_rigid_face_velocities(fields.vx, fields.vy, fields.vz)
+    if boundary is not None:
+        boundary.apply(fields.vx, fields.vy, fields.vz, n)
     update_p(
         fields.p,
         fields.vx,
@@ -339,6 +348,8 @@ def step_numpy(
     slabs: CpmlSlabs,
     fields: Fields | None = None,
     cpml: object | None = None,
+    boundary: object | None = None,
+    n: int = 0,
 ) -> None:
     """Reference leapfrog step (same order as :func:`step`)."""
     i_lo, i_hi, j_lo, j_hi, k_lo, k_hi = _domain_args(p)
@@ -351,6 +362,8 @@ def step_numpy(
 
         cpml_apply_v_numpy(p, vx, vy, vz, fields, coeffs, cpml)
     zero_rigid_face_velocities(vx, vy, vz)
+    if boundary is not None:
+        boundary.apply(vx, vy, vz, n)
     update_p_numpy(p, vx, vy, vz, coeffs.cp, i_lo, i_hi, j_lo, j_hi, k_lo, k_hi)
     if cpml is not None:
         from fdtd.cpml import apply_p_numpy as cpml_apply_p_numpy
