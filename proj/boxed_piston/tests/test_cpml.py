@@ -400,7 +400,7 @@ def _gaussian_pulse_p(
     return float(np.max(blob))
 
 
-def _x_cell_centre_m(i: int, n: int, h: float) -> float:
+def _x_cell_center_m(i: int, n: int, h: float) -> float:
     return (i + 0.5 - 0.5 * n) * h
 
 
@@ -414,8 +414,8 @@ def _first_wall_reflection_time_s(
     margin: float = 0.9,
 ) -> float:
     """Earliest round-trip from source to any outer x face and back to receiver."""
-    x_src = _x_cell_centre_m(i_src, n, h)
-    x_rec = _x_cell_centre_m(i_rec, n, h)
+    x_src = _x_cell_center_m(i_src, n, h)
+    x_rec = _x_cell_center_m(i_rec, n, h)
     x_neg = -0.5 * n * h
     x_pos = 0.5 * n * h
     t_neg = ((x_src - x_neg) + (x_rec - x_neg)) / c_air
@@ -519,7 +519,7 @@ def test_reflection_regression_guard():
         f"reflection error vs large reference over [0, T_wall): "
         f"CPML {db_cpml:.2f} dB, rigid {db_rigid:.2f} dB"
     )
-    assert db_cpml < -18.0, msg  # regression guard; harsh grazing geometry. Real characterisation in C3-cpml.
+    assert db_cpml < -18.0, msg  # regression guard; harsh grazing geometry. Real characterization in C3-cpml.
     assert db_rigid > -10.0, msg
 
 

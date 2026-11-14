@@ -66,7 +66,7 @@ def zero_rigid_face_velocities(
 def point_source_pressure_increment(
     rho: float, c: float, dt: float, h: float, Q: float
 ) -> np.float32:
-    """Volume-velocity point source as a pressure increment at one cell centre.
+    """Volume-velocity point source as a pressure increment at one cell center.
 
     ``ΔP = ρ c² Δt Q / h³`` with *Q* in m³/s (volume velocity).
     """
@@ -152,8 +152,8 @@ def update_p(
 ) -> None:
     """Advance pressure one step: ``p^{n+1} = p^n - cp · div v^{n+½}``.
 
-    ``div v`` is the centred difference from face velocities on all cell
-    centres in the index range; CPML convolutional corrections are applied
+    ``div v`` is the centered difference from face velocities on all cell
+    centers in the index range; CPML convolutional corrections are applied
     in ``cpml.py`` after this update.
     """
     i0 = i_lo
@@ -268,7 +268,7 @@ def update_p_numpy(
 def _domain_args(
     p: np.ndarray,
 ) -> tuple[int, int, int, int, int, int]:
-    """Full-domain cell-centre index ranges for plain Yee updates."""
+    """Full-domain cell-center index ranges for plain Yee updates."""
     nx, ny, nz = p.shape
     return 0, nx, 0, ny, 0, nz
 

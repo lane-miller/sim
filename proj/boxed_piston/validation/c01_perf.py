@@ -412,7 +412,7 @@ def projection_configs() -> list[tuple[str, Config]]:
             ),
         ),
         (
-            "b_300mm_cube_centred_17khz",
+            "b_300mm_cube_centered_17khz",
             Config(
                 box=Box(W=0.3, H=0.3, D=0.3),
                 radiator=Radiator("circle", dims=[0.05], x_c=0.0, y_c=0.0),

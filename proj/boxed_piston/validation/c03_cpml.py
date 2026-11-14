@@ -110,7 +110,7 @@ class SourceGeom:
 
 @dataclass(frozen=True)
 class ReceiverVectors:
-    """Offset vectors from source-cube centre (cells), tied to each domain's CPML geometry."""
+    """Offset vectors from source-cube center (cells), tied to each domain's CPML geometry."""
 
     offset_normal: tuple[int, int, int]
     offset_oblique: tuple[int, int, int]
@@ -126,7 +126,7 @@ class ReceiverSet:
 
 @dataclass(frozen=True)
 class LayoutSpec:
-    """Calibration offsets from source centre (reference domain)."""
+    """Calibration offsets from source center (reference domain)."""
 
     offset_cal: tuple[tuple[int, int, int], ...]
 
@@ -292,7 +292,7 @@ def source_geom(sw: CpmlSweep, n: int, s: int) -> SourceGeom:
 
 
 def source_geom_centered(n: int, s: int, cpml: int) -> SourceGeom:
-    """Source cube centred in the interior (reference domain only)."""
+    """Source cube centered in the interior (reference domain only)."""
     ic = jc = kc = cpml + (n - 2 * cpml) // 2
     i0 = ic - (s - 1) // 2
     j0 = jc - (s - 1) // 2
@@ -301,7 +301,7 @@ def source_geom_centered(n: int, s: int, cpml: int) -> SourceGeom:
 
 
 def make_layout_spec(s: int) -> LayoutSpec:
-    """Calibration probe offsets from source centre (+y, on reference domain)."""
+    """Calibration probe offsets from source center (+y, on reference domain)."""
     return LayoutSpec(
         offset_cal=(
             (0, 4 * s, 0),
@@ -312,7 +312,7 @@ def make_layout_spec(s: int) -> LayoutSpec:
 
 
 def cells_to_plus_x_interface(*, ic: int, n: int, cpml: int) -> int:
-    """Cells from source-cube centre to the +x interior/CPML interface (last interior index)."""
+    """Cells from source-cube center to the +x interior/CPML interface (last interior index)."""
     return (n - cpml - 1) - ic
 
 
@@ -495,7 +495,7 @@ def print_geometry_parity(
             )
         r_m = vc.path_length_m(g, ic, jc, kc, pt[0], pt[1], pt[2])
         rows[name] = {"offset_cells": off, "r_m": r_m, "indices": pt}
-    rows["source_centre"] = (ic, jc, kc)
+    rows["source_center"] = (ic, jc, kc)
     return rows
 
 
@@ -574,7 +574,7 @@ def calibration_window_seconds(
 
 
 def cpml_interface_planes_m(n: int, cpml: int, h: float) -> tuple[float, float, float, float, float, float]:
-    """Interior/CPML boundary face positions (m, domain-centred)."""
+    """Interior/CPML boundary face positions (m, domain-centered)."""
     x_lo = (cpml - 0.5 * n) * h
     x_hi = (n - cpml - 0.5 * n) * h
     y_lo = (cpml - 0.5 * n) * h
@@ -609,7 +609,7 @@ def cpml_interface_reflection_travel_s(
 
 
 def reflection_monitor_points(geom: SourceGeom, rec: ReceiverSet) -> list[tuple[int, int, int]]:
-    """Receivers, index centre, and every source-cube cell."""
+    """Receivers, index center, and every source-cube cell."""
     pts: list[tuple[int, int, int]] = [rec.normal, rec.oblique, (geom.ic, geom.jc, geom.kc)]
     for di in range(geom.s):
         for dj in range(geom.s):
@@ -981,7 +981,7 @@ def plan_reference_n(
         if all_ok:
             print(
                 f"[setup] reference domain planned n={n}³ "
-                f"(source centred, binding receiver={binding!r}, "
+                f"(source centered, binding receiver={binding!r}, "
                 f"slack={worst_slack * 1e3:.3f} ms)",
                 flush=True,
             )
@@ -1185,8 +1185,8 @@ def print_re_z_discrepancy_diagnostics(
     domain: str = "baseline",
 ) -> None:
     """Re Z = ⟨P⟩/Q from full-record FFT; post-injection ⟨p⟩ paired with Qⁿ."""
-    artefact = injection_self_term_re_z(rho=rho, c=c, dt=dt, h=h, s=s)
-    artefact_half = 0.5 * artefact
+    artifact = injection_self_term_re_z(rho=rho, c=c, dt=dt, h=h, s=s)
+    artifact_half = 0.5 * artifact
     print(
         f"\n=== Re Z vs analytic ({domain}, post-injection ⟨p⟩/Qⁿ, full record) ===",
         flush=True,
@@ -1197,8 +1197,8 @@ def print_re_z_discrepancy_diagnostics(
         flush=True,
     )
     print(
-        f"  legacy centred offset ±ρc²Δt/(2V) = ±{artefact_half:.6e}; "
-        f"pre-injection −ρc²Δt/V = −{artefact:.6e} Pa·s/m³ "
+        f"  legacy centered offset ±ρc²Δt/(2V) = ±{artifact_half:.6e}; "
+        f"pre-injection −ρc²Δt/V = −{artifact:.6e} Pa·s/m³ "
         f"(V=({s}·h)³) — ΔRe should NOT be constant at these scales",
         flush=True,
     )
@@ -1227,7 +1227,7 @@ def print_re_z_discrepancy_diagnostics(
         )
     if delta_res:
         mean_delta = float(np.mean(delta_res))
-        targets = (artefact_half, -artefact_half, -artefact)
+        targets = (artifact_half, -artifact_half, -artifact)
         offset_present = any(
             abs(mean_delta - t) <= 0.2 * max(abs(t), 1e-30) for t in targets
         )
@@ -1481,9 +1481,9 @@ def run_monopole_calibration(
     rho, c, h = cfg.air.rho, cfg.air.c, d.h
     L_m = float(s) * h
     ic, jc, kc = geom.ic, geom.jc, geom.kc
-    xc, yc, zc = vc.cube_geometric_centre_m(g, geom)
+    xc, yc, zc = vc.cube_geometric_center_m(g, geom)
     xic, yic, zic = vc.coords_m(g, ic, jc, kc)
-    dr_centre = math.hypot(xc - xic, yc - yic, zc - zic)
+    dr_center = math.hypot(xc - xic, yc - yic, zc - zic)
     rows: list[dict[str, Any]] = []
     ok = True
     win_meta: list[dict[str, Any]] = []
@@ -1571,8 +1571,8 @@ def run_monopole_calibration(
         "windows": win_meta,
         "phase_fit": phase_fit,
         "source_centroid_m": (xc, yc, zc),
-        "index_centre_m": (xic, yic, zic),
-        "centre_offset_m": dr_centre,
+        "index_center_m": (xic, yic, zic),
+        "center_offset_m": dr_center,
         "label": label,
         "s_cube": s,
     }
@@ -1581,9 +1581,9 @@ def run_monopole_calibration(
 def print_calibration_table(cal: dict[str, Any], *, dt: float) -> None:
     tag = cal.get("label") or "reference domain"
     print(f"\n=== Monopole calibration ({tag}, s={cal.get('s_cube', '?')}) ===")
-    if cal.get("centre_offset_m") is not None:
+    if cal.get("center_offset_m") is not None:
         print(
-            f"  source centroid vs (ic,jc,kc): Δr={cal['centre_offset_m']:.3e} m",
+            f"  source centroid vs (ic,jc,kc): Δr={cal['center_offset_m']:.3e} m",
             flush=True,
         )
     hdr = (
@@ -1785,7 +1785,7 @@ def run_reference(
         )
     p0 = parity_map[vector_spectra_key(vector_union[0])]
     print(
-        f"[ref] centred source @ {p0['source_centre']} "
+        f"[ref] centered source @ {p0['source_center']} "
         f"union vectors={len(vector_union)} "
         f"r_norm@0={p0['normal']['r_m']:.4f} m binding={binding!r}",
         flush=True,
@@ -2501,7 +2501,7 @@ def plan_all_domains(
             n_steps=ref_steps,
             t_echo_s=t_echo_ref,
             t_window_s=window.t_window_s,
-            notes=f"source centred; binding={binding_ref}; sweep-max window",
+            notes=f"source centered; binding={binding_ref}; sweep-max window",
         )
     ]
     for sw in configs:
@@ -2817,9 +2817,9 @@ def calibration_for_json(cal: dict[str, Any] | None) -> dict[str, Any] | None:
         "label": cal.get("label"),
         "s_cube": cal.get("s_cube"),
         "phase_fit": dict(cal.get("phase_fit") or {}),
-        "centre_offset_m": cal.get("centre_offset_m"),
+        "center_offset_m": cal.get("center_offset_m"),
         "source_centroid_m": list(cal.get("source_centroid_m") or ()),
-        "index_centre_m": list(cal.get("index_centre_m") or ()),
+        "index_center_m": list(cal.get("index_center_m") or ()),
     }
     rows: list[dict[str, Any]] = []
     for row in cal.get("rows") or []:
@@ -2849,7 +2849,7 @@ def result_row_for_json(r: dict[str, Any]) -> dict[str, Any]:
     gp = r.get("geometry_parity") or {}
     geom_p: dict[str, Any] = {}
     for key, val in gp.items():
-        if key == "source_centre":
+        if key == "source_center":
             geom_p[key] = list(val) if val is not None else None
         elif isinstance(val, dict):
             geom_p[key] = {
@@ -3233,12 +3233,12 @@ def main() -> int:
         )
         if cal_s1["pass"] and not calibration["pass"]:
             print(
-                "  → point source PASS, cube FAIL: implicate cube form factor / centre",
+                "  → point source PASS, cube FAIL: implicate cube form factor / center",
                 flush=True,
             )
         elif abs(pf_s.get("phi0_deg", 0.0)) < abs(pf_c.get("phi0_deg", 0.0)):
             print(
-                "  → smaller phase error at s=1: check geometric centre vs (ic,jc,kc)",
+                "  → smaller phase error at s=1: check geometric center vs (ic,jc,kc)",
                 flush=True,
             )
     if not calibration["pass"]:

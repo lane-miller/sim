@@ -128,7 +128,7 @@ def apply_h_from_ppw(d: object, cfg: Config, *, f_ref: float, ppw: float) -> Non
     sync_dt(cfg, d)
 
 
-def centre_index(n: int) -> int:
+def center_index(n: int) -> int:
     return n // 2
 
 
@@ -252,8 +252,8 @@ def print_leapfrog_timing_convention(*, dt: float) -> None:
     )
 
 
-def cube_geometric_centre_m(g: Grid, geom: object) -> tuple[float, float, float]:
-    """Mean cell-centre position of the source cube (true centroid; even s may sit between cells)."""
+def cube_geometric_center_m(g: Grid, geom: object) -> tuple[float, float, float]:
+    """Mean cell-center position of the source cube (true centroid; even s may sit between cells)."""
     i0 = int(geom.i0)  # type: ignore[attr-defined]
     j0 = int(geom.j0)
     k0 = int(geom.k0)
@@ -270,10 +270,10 @@ def cube_geometric_centre_m(g: Grid, geom: object) -> tuple[float, float, float]
     return sx / n, sy / n, sz / n
 
 
-def path_length_from_cube_centre_m(
+def path_length_from_cube_center_m(
     g: Grid, geom: object, i1: int, j1: int, k1: int
 ) -> float:
-    xs, ys, zs = cube_geometric_centre_m(g, geom)
+    xs, ys, zs = cube_geometric_center_m(g, geom)
     xr, yr, zr = coords_m(g, i1, j1, k1)
     return math.hypot(xr - xs, yr - ys, zr - zs)
 

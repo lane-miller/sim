@@ -223,7 +223,7 @@ def derive(cfg: Config) -> Derived:
       ``zrad_fallback`` (analytic Z_rad path in later stages).
     * **Δt** — ``cfl_safety · h / (c·√3)`` (3-D CFL).
     * **Realised box** — each side rounded to an integer number of cells at ``h``.
-    * **Radiator centre in cells** — ``round(x_c/h)``, ``round(y_c/h)`` on the front face.
+    * **Radiator center in cells** — ``round(x_c/h)``, ``round(y_c/h)`` on the front face.
     * **Domain** — along each axis: ``cpml + gap + box_cells + gap + cpml`` (free-field:
       zero box cells; at least one cell per axis).
     * **CPML α** — ``cpml_alpha_factor · π · f_min``.

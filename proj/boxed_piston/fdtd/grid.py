@@ -28,7 +28,7 @@ class CpmlSlabs:
     """CPML slab index ranges on the staggered acoustic Yee grid.
 
     **Pressure** ``p[i, j, k]`` uses the same six face slabs on ``i``, ``j``, and
-    ``k`` (cell-centre indices).
+    ``k`` (cell-center indices).
 
     **Velocity** components live on faces; the normal axis uses one extra index
     at the outer boundary:
@@ -45,7 +45,7 @@ class CpmlSlabs:
     ``(nx or nx±1, …)`` inside each slab kernel; only the documented normal-axis
     ranges differ from ``p``.
 
-    **Interior** (non-CPML cell centres): ``i ∈ [cpml, nx - cpml)`` (and likewise
+    **Interior** (non-CPML cell centers): ``i ∈ [cpml, nx - cpml)`` (and likewise
     for ``j``, ``k``).
     """
 
@@ -130,17 +130,17 @@ class Grid:
             self.nx, self.ny, self.nz, self.cpml
         )
 
-        # Stage A free-field: origin at the domain centre (metres).
-        # TODO(Stage C): when cfg.box is set, shift so the origin is the radiator centre
+        # Stage A free-field: origin at the domain center (meters).
+        # TODO(Stage C): when cfg.box is set, shift so the origin is the radiator center
         # on the front face (+z outward normal), per brief §1.
-        self.x_p = self._cell_centres(self.nx)
-        self.y_p = self._cell_centres(self.ny)
-        self.z_p = self._cell_centres(self.nz)
+        self.x_p = self._cell_centers(self.nx)
+        self.y_p = self._cell_centers(self.ny)
+        self.z_p = self._cell_centers(self.nz)
         self.x_vx = self._faces(self.nx)
         self.y_vy = self._faces(self.ny)
         self.z_vz = self._faces(self.nz)
 
-    def _cell_centres(self, n: int) -> np.ndarray:
+    def _cell_centers(self, n: int) -> np.ndarray:
         i = np.arange(n, dtype=_FLOAT32)
         return (i + 0.5 - 0.5 * n) * np.float32(self.h)
 
@@ -149,7 +149,7 @@ class Grid:
         return (i - 0.5 * n) * np.float32(self.h)
 
     def coords_of(self, i: int, j: int, k: int) -> tuple[float, float, float]:
-        """Pressure cell-centre coordinates (m) at indices ``(i, j, k)``."""
+        """Pressure cell-center coordinates (m) at indices ``(i, j, k)``."""
         return (
             float(self.x_p[i]),
             float(self.y_p[j]),

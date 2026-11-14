@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """C2-dispersion: free-field point source phase error vs points per wavelength (Stage A).
 
-CPML-backed cubic domain, volume-velocity point source at centre, receivers on
+CPML-backed cubic domain, volume-velocity point source at center, receivers on
 three rays. Compares measured two-receiver transfer ratios to the analytic
 spherical wave and to the 3-D Yee numerical dispersion relation.
 """
@@ -199,7 +199,7 @@ def _domain_half_extent_m(n: int, h: float) -> float:
     return 0.5 * n * h
 
 
-def _centre_index(n: int) -> int:
+def _center_index(n: int) -> int:
     return n // 2
 
 
@@ -214,7 +214,7 @@ def _ray_indices(
     dist_cells: tuple[int, ...],
 ) -> dict[RayName, list[tuple[int, int, int, int]]]:
     """Receivers on three rays: ``(i, j, k, offset_cells along ray)``."""
-    ic = jc = kc = _centre_index(n)
+    ic = jc = kc = _center_index(n)
     inset = cpml + _MIN_CPML_CLEARANCE_CELLS
     max_offset = min(ic - inset, n - 1 - ic - inset)
 
@@ -296,7 +296,7 @@ def receiver_window_samples(
     kc: int,
     trace_len: int,
 ) -> tuple[int, int, str] | tuple[None, None, str]:
-    """Absolute sample window ``[i_start, i_end)`` centred on the direct arrival."""
+    """Absolute sample window ``[i_start, i_end)`` centered on the direct arrival."""
     c = cfg.air.c
     sigma = d.pulse_sigma
     pulse_t0 = d.pulse_t0
@@ -374,7 +374,7 @@ def quick_geometry_feasible(
     g, d, cfg, *_ = build_dispersion_domain(
         f_ref=f_ref, ppw=ppw, n=n, cpml_cells=cpml
     )
-    ic = jc = kc = _centre_index(n)
+    ic = jc = kc = _center_index(n)
     raw = _ray_indices(n, cpml=cpml, dist_cells=dist)
     rec = attach_physical_radii(raw, g.h)
     n_analysis, _ = _choose_n_steps(
@@ -1586,7 +1586,7 @@ def main() -> int:
     g, d, cfg, cpml_st, coeffs, slabs = build_dispersion_domain(
         f_ref=args.f_ref, ppw=args.ppw, n=n, cpml_cells=_CPML_CELLS
     )
-    ic = jc = kc = _centre_index(n)
+    ic = jc = kc = _center_index(n)
     raw_rays = _ray_indices(n, cpml=_CPML_CELLS, dist_cells=dist_cells)
     receivers = attach_physical_radii(raw_rays, g.h)
     n_pre, _ = _choose_n_steps(

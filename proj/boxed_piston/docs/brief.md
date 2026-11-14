@@ -14,8 +14,8 @@ A config-driven solver that computes, for **one physical system per run**:
 
 **Conventions:**
 - Time convention e^{+jωt}. NumPy's forward FFT, P(ω) = Σ p(t)·e^{−jωt}, is already consistent with it, so no conjugation is needed for FDTD data. Conjugate only data imported from e^{−iωt} codes (e.g. bempp in C9).
-- z = ∫_radiator p dS / (ρc·S·v), the dimensionless impedance (acoustic Z_A normalised by ρc/S).
-- The origin is at the radiator centre, with +z the outward face normal.
+- z = ∫_radiator p dS / (ρc·S·v), the dimensionless impedance (acoustic Z_A normalized by ρc/S).
+- The origin is at the radiator center, with +z the outward face normal.
 - SI units throughout. Air defaults: c = 343 m/s, ρ = 1.204 kg/m³. Both are configurable.
 
 **Range (defaults, all configurable):** f from f_min (default 20 Hz) to f_max (default min(20 kHz, the frequency at which ka = 10)). Above ka ≈ 10 a real cone has broken up, so a rigid piston is no longer physical. Intended box dimensions are 10–600 mm, with aspect ratio ≤ 4. Values outside these ranges are allowed, with a pre-flight warning (§3).
@@ -23,7 +23,7 @@ A config-driven solver that computes, for **one physical system per run**:
 ## 2. Method
 **Derived, not fixed.** Every number below (h, Δt, points per wavelength, cells across the radiator, gap, CPML thickness and α, pulse width, run length, decimation, cell budget) is an illustrative default. The solver computes each one per system from the config (f_min, f_max, box and radiator geometry, tolerances) using the rules in this section. Defaults live in one place, can be overridden in the config, and are written to the output metadata. Check results (§5) update the defaults and the pre-flight thresholds.
 
-- **Scheme:** linear acoustic FDTD on a staggered (Yee) grid, with p at cell centres and v on cell faces. 2nd order in space and time.
+- **Scheme:** linear acoustic FDTD on a staggered (Yee) grid, with p at cell centers and v on cell faces. 2nd order in space and time.
 - **Box:** aligned with the grid. It is rigid through v_n = 0 on its faces, so edges and corners are exact. Realised dimensions are rounded to h and reported.
 - **Grid spacing:** h = min(λ_min/20, D/10), where D is the radiator diameter (the smallest dimension for non-circular masks). This resolves both the waves and the radiator.
 - **Time step:** Δt = h/(c√3), the CFL limit. Example: at 20 kHz, h ≈ 0.858 mm and Δt ≈ 1.44 µs. f_max is set by h, not by Δt.
@@ -42,6 +42,7 @@ A config-driven solver that computes, for **one physical system per run**:
   - Rigid faces: p_face = p_c, which is O(h²) because ∂p/∂n = 0.
   - Radiator cells: p_face = p_c − (h/2)ρ∂v_n/∂t, with the sign set by the normal direction.
   - Edge-adjacent cells are singular (p ~ r^(−1/3)); their convergence is checked separately.
+  - Far field / KH uses a **Huygens surface** (C4-kh), not the box faces; box-face p is for surface probes.
 
 ## 3. Software design
 - **Input:** a JSON config holding box dimensions, radiator shape, size and position, f_min, f_max, tolerances, optional overrides for derived parameters, the far-field angle grid, and the output path.
@@ -61,12 +62,13 @@ A config-driven solver that computes, for **one physical system per run**:
   - the input pulse v(t);
   - the area-weighted, radiator-averaged p(t) at the full step rate;
   - the surface p(t) on all box faces at full spatial resolution, decimated in time only (to about 2.5·f_max, which is lossless within the band); roughly 0.1–2 GB per run;
+  - **p** and **v_n** on a Huygens surface offset by **N** cells (default 3, inside the air gap) at the decimated time rate; Huygens face **p** by 4-point cubic interpolation of cell-center **p** along the normal (C4-kh: error ≈ 3(kh)⁴/128); Huygens offset ≥ 2 cells from box and CPML (default 3);
   - run metadata (h, Δt, number of steps, decimation, run time, peak RAM, `zrad_source`).
 
   The volume field is not stored. Optional mid-plane snapshots can be saved for debugging. Compression (spatial downsampling, decomposition) comes after the solver is verified.
 - **Post-processing:** a separate module computes:
   - z(f), from the radiator-averaged p(t) and v(t);
-  - the far field and near-field probes, via Kirchhoff–Helmholtz over the box faces using the stored surface p, the known v_n and the analytic Green's function.
+  - the far field and near-field probes **outside** the Huygens surface via Kirchhoff–Helmholtz on the stored Huygens **p** and **v_n**; box-surface p is used for on-surface probes only.
 
   The default far-field output is p at 1 m per 1 m/s radiator velocity, on a full sphere at 5° spacing.
 - **Storage:** run outputs go to a configurable path, such as the external SSD, and are excluded from git.
@@ -113,12 +115,14 @@ Measured in C1-perf at ~375 M cell-updates/s, ~3.4 box transits, without surface
 |---|---|---|---|
 | C4-kh | Kirchhoff–Helmholtz over a closed box surface, applied to an analytic point-source field with face-extrapolated p | Analytic | Quadrature, normal or sign errors → fix before Stage C |
 
+**Stage B results:** C4-kh **PASS** (2026-11-14): exact-surface extinction ≤0.1% at 1.5–10× box size; ~2nd-order convergence in h; half-cell offset on **box** faces (p at h/2 outside) gives 3× probe rel err ≈2% / 4% / 14% at 1 / 4 / 10 kHz; **Huygens** (2 cells out, face **v_n** exact): 2-point face **p** (order 2) ≈0.3% / 0.7% / **1.5%** at 1 / 4 / 10 kHz (3× probe, ∝(kh)²); 4-point cubic face **p** (order 4) ≈0.1% / 0.2% / **≤0.2%** at 1 / 4 / 10 kHz on 3× & 10× probes and far field.
+
 **Stage C: box and radiator** (`grid.py` box mask and area weights, `source.py`, `recorder.py`, `run.py`).
 
 | Check | What | Reference | Gate |
 |---|---|---|---|
 | C5-lowfreq | Small box (kL ≪ 1), radiator at least 10 cells across | Monopole: Re z → (ka)²/4 | Low-frequency z wrong → debug face pressure, half-step correction, CPML |
-| C6-baffle | Large box, centred radiator | Baffled closed form (mean trend); Rayleigh near field | Area weighting or sign convention wrong |
+| C6-baffle | Large box, centered radiator | Baffled closed form (mean trend); Rayleigh near field | Area weighting or sign convention wrong |
 | C7-subcell | Radiator shifted by fractions of a cell | Smoothness of z | Area weighting wrong |
 | C8-convergence | Grid convergence (h, h/2) plus Richardson extrapolation; one float32 vs float64 run | Self-consistency | Sets the final defaults for points per wavelength and precision; checks edge-cell convergence |
 
@@ -146,7 +150,7 @@ Days 1–3 are the critical path. If they slip, reduce the scope of C9; don't sk
 - **Baffle subtraction for under-resolved radiators.** Run the same radiator mask on the same grid in a half-space with an infinite rigid plane, then take Z = Z_baffled,exact + (Z_FDTD,box − Z_FDTD,baffle), so the grid's self-term error cancels. This would replace the analytic fallback. Non-circular masks need the exact baffled Z from a series solution or a numerical Rayleigh self-impedance integral. The approach is unpublished for this use and needs its own validation test.
 - **Superposition library.** One run per face patch gives a full column of mutual pressures, so N runs give exact Z and far field for any radiator on that box. That's about 256 runs per box shape at 16×16 patches per quadrant, so it needs a GPU.
 - **Data reduction.** Per-frequency spatial downsampling and decomposition of the stored surface pressure.
-- **Parameter sweeps** across normalised box and radiator shapes, with fitted functions and lookup for acs-lpm. One run per normalised shape covers all physical sizes via kL.
+- **Parameter sweeps** across normalized box and radiator shapes, with fitted functions and lookup for acs-lpm. One run per normalized shape covers all physical sizes via kL.
 - **CuPy or GPU backend.** Higher-order or low-dispersion schemes if C2-dispersion and C8-convergence show the high-kL phase error is too large.
 - Fillets, recessed or domed radiators, multiple radiators, and non-uniform velocity.
 

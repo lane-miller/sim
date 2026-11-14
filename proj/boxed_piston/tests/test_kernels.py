@@ -274,7 +274,7 @@ def test_energy_conservation_closed_rigid():
     assert rel < 1.0e-4
 
 
-def test_centred_gaussian_pressure_symmetry():
+def test_centered_gaussian_pressure_symmetry():
     n = 17
     cpml = 0
     g, d, coeffs = _grid_n(n, cpml=cpml)
