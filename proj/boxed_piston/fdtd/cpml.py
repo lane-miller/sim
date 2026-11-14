@@ -73,7 +73,7 @@ def _profile_row(
 
 
 def _profile_row_v(
-    n: int,
+    n_cells: int,
     *,
     neg: bool,
     sigma_max: float,
@@ -82,18 +82,21 @@ def _profile_row_v(
     m: float,
     dt: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Face-staggered depths: ``q / (n-1)`` spans the layer (``n = cpml+1``)."""
-    b = np.empty(n, dtype=_FLOAT32)
-    a = np.empty(n, dtype=_FLOAT32)
-    inv_km1 = np.empty(n, dtype=_FLOAT32)
-    layer = max(n - 1, 1)
-    for q in range(n):
+    """Face-staggered depths ``d_v = q/n_cells``, ``q ∈ [0, n_cells]`` (``n_cells+1`` rows).
+
+    Interior interface: ``σ = κ−1 = 0`` at ``q=0`` (pos) or ``q=n_cells`` (neg); outer wall
+    at ``q=n_cells`` (pos) or ``q=0`` (neg) has ``σ = σ_max``.
+    """
+    n_faces = n_cells + 1
+    b = np.empty(n_faces, dtype=_FLOAT32)
+    a = np.empty(n_faces, dtype=_FLOAT32)
+    inv_km1 = np.empty(n_faces, dtype=_FLOAT32)
+    denom = max(n_cells, 1)
+    for q in range(n_faces):
         if neg:
-            # vx face i=q; q=0 rigid wall, q=layer at interior interface
-            d_over_L = (layer - q) / layer
+            d_over_L = (n_cells - q) / denom
         else:
-            # vx face at positive slab; q=0 interior, q=layer−1 toward wall
-            d_over_L = (q + 1) / layer
+            d_over_L = q / denom
         d_over_L = min(max(d_over_L, 0.0), 1.0)
         power = d_over_L**m
         sigma = sigma_max * power
@@ -135,9 +138,8 @@ def build_cpml_coeffs(
         dt=dt,
     )
 
-    nv = c + 1
     b_vn, a_vn, ik_vn = _profile_row_v(
-        nv, neg=True, sigma_max=sigma_max, kappa_max=kappa_max,
+        c, neg=True, sigma_max=sigma_max, kappa_max=kappa_max,
         alpha_max=alpha_max, m=m, dt=dt,
     )
     return CpmlCoeffs(
@@ -187,7 +189,7 @@ def face_rows(cpml: CpmlCoeffs, cfg: Config, derived: Derived, dt: float) -> Cpm
         alpha_max=alpha_max, m=m, dt=dt,
     )
     b_vp, a_vp, ik_vp = _profile_row_v(
-        c + 1, neg=False, sigma_max=sigma_max, kappa_max=kappa_max,
+        c, neg=False, sigma_max=sigma_max, kappa_max=kappa_max,
         alpha_max=alpha_max, m=m, dt=dt,
     )
     return CpmlFaceRows(
@@ -425,7 +427,10 @@ def make_cpml_state(
 
 
 def apply_v(
-    fields: Fields, cpml_state: CpmlState, update: UpdateCoeffs
+    fields: Fields,
+    cpml_state: CpmlState,
+    update: UpdateCoeffs,
+    axes: tuple[bool, bool, bool] = (True, True, True),
 ) -> None:
     c = cpml_state.coeffs.cpml_cells
     if c <= 0:
@@ -433,31 +438,37 @@ def apply_v(
     r = cpml_state.rows
     nx, ny, nz = fields.p.shape
     cv = update.cv
-    _cpml_vx_slabs(
-        fields.p, fields.vx,
-        fields.psi_vx_neg, fields.psi_vx_pos,
-        cv, c, nx,
-        r.b_v_neg, r.a_v_neg, r.ik_v_neg,
-        r.b_v_pos, r.a_v_pos, r.ik_v_pos,
-    )
-    _cpml_vy_slabs(
-        fields.p, fields.vy,
-        fields.psi_vy_neg, fields.psi_vy_pos,
-        cv, c, ny,
-        r.b_v_neg, r.a_v_neg, r.ik_v_neg,
-        r.b_v_pos, r.a_v_pos, r.ik_v_pos,
-    )
-    _cpml_vz_slabs(
-        fields.p, fields.vz,
-        fields.psi_vz_neg, fields.psi_vz_pos,
-        cv, c, nz,
-        r.b_v_neg, r.a_v_neg, r.ik_v_neg,
-        r.b_v_pos, r.a_v_pos, r.ik_v_pos,
-    )
+    if axes[0]:
+        _cpml_vx_slabs(
+            fields.p, fields.vx,
+            fields.psi_vx_neg, fields.psi_vx_pos,
+            cv, c, nx,
+            r.b_v_neg, r.a_v_neg, r.ik_v_neg,
+            r.b_v_pos, r.a_v_pos, r.ik_v_pos,
+        )
+    if axes[1]:
+        _cpml_vy_slabs(
+            fields.p, fields.vy,
+            fields.psi_vy_neg, fields.psi_vy_pos,
+            cv, c, ny,
+            r.b_v_neg, r.a_v_neg, r.ik_v_neg,
+            r.b_v_pos, r.a_v_pos, r.ik_v_pos,
+        )
+    if axes[2]:
+        _cpml_vz_slabs(
+            fields.p, fields.vz,
+            fields.psi_vz_neg, fields.psi_vz_pos,
+            cv, c, nz,
+            r.b_v_neg, r.a_v_neg, r.ik_v_neg,
+            r.b_v_pos, r.a_v_pos, r.ik_v_pos,
+        )
 
 
 def apply_p(
-    fields: Fields, cpml_state: CpmlState, update: UpdateCoeffs
+    fields: Fields,
+    cpml_state: CpmlState,
+    update: UpdateCoeffs,
+    axes: tuple[bool, bool, bool] = (True, True, True),
 ) -> None:
     c = cpml_state.coeffs.cpml_cells
     if c <= 0:
@@ -465,27 +476,30 @@ def apply_p(
     r = cpml_state.rows
     nx, ny, nz = fields.p.shape
     cp = update.cp
-    _cpml_p_x_slabs(
-        fields.p, fields.vx,
-        fields.psi_p_x_neg, fields.psi_p_x_pos,
-        cp, c, nx,
-        r.b_p_neg, r.a_p_neg, r.ik_p_neg,
-        r.b_p_pos, r.a_p_pos, r.ik_p_pos,
-    )
-    _cpml_p_y_slabs(
-        fields.p, fields.vy,
-        fields.psi_p_y_neg, fields.psi_p_y_pos,
-        cp, c, ny,
-        r.b_p_neg, r.a_p_neg, r.ik_p_neg,
-        r.b_p_pos, r.a_p_pos, r.ik_p_pos,
-    )
-    _cpml_p_z_slabs(
-        fields.p, fields.vz,
-        fields.psi_p_z_neg, fields.psi_p_z_pos,
-        cp, c, nz,
-        r.b_p_neg, r.a_p_neg, r.ik_p_neg,
-        r.b_p_pos, r.a_p_pos, r.ik_p_pos,
-    )
+    if axes[0]:
+        _cpml_p_x_slabs(
+            fields.p, fields.vx,
+            fields.psi_p_x_neg, fields.psi_p_x_pos,
+            cp, c, nx,
+            r.b_p_neg, r.a_p_neg, r.ik_p_neg,
+            r.b_p_pos, r.a_p_pos, r.ik_p_pos,
+        )
+    if axes[1]:
+        _cpml_p_y_slabs(
+            fields.p, fields.vy,
+            fields.psi_p_y_neg, fields.psi_p_y_pos,
+            cp, c, ny,
+            r.b_p_neg, r.a_p_neg, r.ik_p_neg,
+            r.b_p_pos, r.a_p_pos, r.ik_p_pos,
+        )
+    if axes[2]:
+        _cpml_p_z_slabs(
+            fields.p, fields.vz,
+            fields.psi_p_z_neg, fields.psi_p_z_pos,
+            cp, c, nz,
+            r.b_p_neg, r.a_p_neg, r.ik_p_neg,
+            r.b_p_pos, r.a_p_pos, r.ik_p_pos,
+        )
 
 
 def apply_v_numpy(
@@ -496,6 +510,7 @@ def apply_v_numpy(
     fields: Fields,
     update: UpdateCoeffs,
     cpml_state: CpmlState,
+    axes: tuple[bool, bool, bool] = (True, True, True),
 ) -> None:
     """NumPy reference matching :func:`apply_v` loops (mutates *vx*, *vy*, *vz*, ψ)."""
     c = cpml_state.coeffs.cpml_cells
@@ -505,53 +520,56 @@ def apply_v_numpy(
     cv = update.cv
     nx, ny, nz = p.shape
 
-    for j in range(ny):
-        for k in range(nz):
-            for q in range(1, c + 1):
-                i = q
-                dp = p[i, j, k] - p[i - 1, j, k]
-                ps = r.b_v_neg[q] * fields.psi_vx_neg[q, j, k] + r.a_v_neg[q] * dp
-                fields.psi_vx_neg[q, j, k] = np.float32(ps)
-                vx[i, j, k] -= cv * (r.ik_v_neg[q] * dp + ps)
-            base = nx - c
-            for q in range(c):
-                i = base + q
-                dp = p[i, j, k] - p[i - 1, j, k]
-                ps = r.b_v_pos[q] * fields.psi_vx_pos[q, j, k] + r.a_v_pos[q] * dp
-                fields.psi_vx_pos[q, j, k] = np.float32(ps)
-                vx[i, j, k] -= cv * (r.ik_v_pos[q] * dp + ps)
-
-    for i in range(nx):
-        for k in range(nz):
-            for q in range(1, c + 1):
-                j = q
-                dp = p[i, j, k] - p[i, j - 1, k]
-                ps = r.b_v_neg[q] * fields.psi_vy_neg[i, q, k] + r.a_v_neg[q] * dp
-                fields.psi_vy_neg[i, q, k] = np.float32(ps)
-                vy[i, j, k] -= cv * (r.ik_v_neg[q] * dp + ps)
-            base = ny - c
-            for q in range(c):
-                j = base + q
-                dp = p[i, j, k] - p[i, j - 1, k]
-                ps = r.b_v_pos[q] * fields.psi_vy_pos[i, q, k] + r.a_v_pos[q] * dp
-                fields.psi_vy_pos[i, q, k] = np.float32(ps)
-                vy[i, j, k] -= cv * (r.ik_v_pos[q] * dp + ps)
-
-    for i in range(nx):
+    if axes[0]:
         for j in range(ny):
-            for q in range(1, c + 1):
-                kk = q
-                dp = p[i, j, kk] - p[i, j, kk - 1]
-                ps = r.b_v_neg[q] * fields.psi_vz_neg[i, j, q] + r.a_v_neg[q] * dp
-                fields.psi_vz_neg[i, j, q] = np.float32(ps)
-                vz[i, j, kk] -= cv * (r.ik_v_neg[q] * dp + ps)
-            base = nz - c
-            for q in range(c):
-                kk = base + q
-                dp = p[i, j, kk] - p[i, j, kk - 1]
-                ps = r.b_v_pos[q] * fields.psi_vz_pos[i, j, q] + r.a_v_pos[q] * dp
-                fields.psi_vz_pos[i, j, q] = np.float32(ps)
-                vz[i, j, kk] -= cv * (r.ik_v_pos[q] * dp + ps)
+            for k in range(nz):
+                for q in range(1, c + 1):
+                    i = q
+                    dp = p[i, j, k] - p[i - 1, j, k]
+                    ps = r.b_v_neg[q] * fields.psi_vx_neg[q, j, k] + r.a_v_neg[q] * dp
+                    fields.psi_vx_neg[q, j, k] = np.float32(ps)
+                    vx[i, j, k] -= cv * (r.ik_v_neg[q] * dp + ps)
+                base = nx - c
+                for q in range(c):
+                    i = base + q
+                    dp = p[i, j, k] - p[i - 1, j, k]
+                    ps = r.b_v_pos[q] * fields.psi_vx_pos[q, j, k] + r.a_v_pos[q] * dp
+                    fields.psi_vx_pos[q, j, k] = np.float32(ps)
+                    vx[i, j, k] -= cv * (r.ik_v_pos[q] * dp + ps)
+
+    if axes[1]:
+        for i in range(nx):
+            for k in range(nz):
+                for q in range(1, c + 1):
+                    j = q
+                    dp = p[i, j, k] - p[i, j - 1, k]
+                    ps = r.b_v_neg[q] * fields.psi_vy_neg[i, q, k] + r.a_v_neg[q] * dp
+                    fields.psi_vy_neg[i, q, k] = np.float32(ps)
+                    vy[i, j, k] -= cv * (r.ik_v_neg[q] * dp + ps)
+                base = ny - c
+                for q in range(c):
+                    j = base + q
+                    dp = p[i, j, k] - p[i, j - 1, k]
+                    ps = r.b_v_pos[q] * fields.psi_vy_pos[i, q, k] + r.a_v_pos[q] * dp
+                    fields.psi_vy_pos[i, q, k] = np.float32(ps)
+                    vy[i, j, k] -= cv * (r.ik_v_pos[q] * dp + ps)
+
+    if axes[2]:
+        for i in range(nx):
+            for j in range(ny):
+                for q in range(1, c + 1):
+                    kk = q
+                    dp = p[i, j, kk] - p[i, j, kk - 1]
+                    ps = r.b_v_neg[q] * fields.psi_vz_neg[i, j, q] + r.a_v_neg[q] * dp
+                    fields.psi_vz_neg[i, j, q] = np.float32(ps)
+                    vz[i, j, kk] -= cv * (r.ik_v_neg[q] * dp + ps)
+                base = nz - c
+                for q in range(c):
+                    kk = base + q
+                    dp = p[i, j, kk] - p[i, j, kk - 1]
+                    ps = r.b_v_pos[q] * fields.psi_vz_pos[i, j, q] + r.a_v_pos[q] * dp
+                    fields.psi_vz_pos[i, j, q] = np.float32(ps)
+                    vz[i, j, kk] -= cv * (r.ik_v_pos[q] * dp + ps)
 
 
 def apply_p_numpy(
@@ -562,6 +580,7 @@ def apply_p_numpy(
     fields: Fields,
     update: UpdateCoeffs,
     cpml_state: CpmlState,
+    axes: tuple[bool, bool, bool] = (True, True, True),
 ) -> None:
     c = cpml_state.coeffs.cpml_cells
     if c <= 0:
@@ -570,50 +589,53 @@ def apply_p_numpy(
     cp = update.cp
     nx, ny, nz = p.shape
 
-    for j in range(ny):
-        for k in range(nz):
-            for q in range(c):
-                i = q
-                dv = vx[i + 1, j, k] - vx[i, j, k]
-                ps = r.b_p_neg[q] * fields.psi_p_x_neg[q, j, k] + r.a_p_neg[q] * dv
-                fields.psi_p_x_neg[q, j, k] = np.float32(ps)
-                p[i, j, k] -= cp * (r.ik_p_neg[q] * dv + ps)
-            base = nx - c
-            for q in range(c):
-                i = base + q
-                dv = vx[i + 1, j, k] - vx[i, j, k]
-                ps = r.b_p_pos[q] * fields.psi_p_x_pos[q, j, k] + r.a_p_pos[q] * dv
-                fields.psi_p_x_pos[q, j, k] = np.float32(ps)
-                p[i, j, k] -= cp * (r.ik_p_pos[q] * dv + ps)
-
-    for i in range(nx):
-        for k in range(nz):
-            for q in range(c):
-                j = q
-                dv = vy[i, j + 1, k] - vy[i, j, k]
-                ps = r.b_p_neg[q] * fields.psi_p_y_neg[i, q, k] + r.a_p_neg[q] * dv
-                fields.psi_p_y_neg[i, q, k] = np.float32(ps)
-                p[i, j, k] -= cp * (r.ik_p_neg[q] * dv + ps)
-            base = ny - c
-            for q in range(c):
-                j = base + q
-                dv = vy[i, j + 1, k] - vy[i, j, k]
-                ps = r.b_p_pos[q] * fields.psi_p_y_pos[i, q, k] + r.a_p_pos[q] * dv
-                fields.psi_p_y_pos[i, q, k] = np.float32(ps)
-                p[i, j, k] -= cp * (r.ik_p_pos[q] * dv + ps)
-
-    for i in range(nx):
+    if axes[0]:
         for j in range(ny):
-            for q in range(c):
-                kk = q
-                dv = vz[i, j, kk + 1] - vz[i, j, kk]
-                ps = r.b_p_neg[q] * fields.psi_p_z_neg[i, j, q] + r.a_p_neg[q] * dv
-                fields.psi_p_z_neg[i, j, q] = np.float32(ps)
-                p[i, j, kk] -= cp * (r.ik_p_neg[q] * dv + ps)
-            base = nz - c
-            for q in range(c):
-                kk = base + q
-                dv = vz[i, j, kk + 1] - vz[i, j, kk]
-                ps = r.b_p_pos[q] * fields.psi_p_z_pos[i, j, q] + r.a_p_pos[q] * dv
-                fields.psi_p_z_pos[i, j, q] = np.float32(ps)
-                p[i, j, kk] -= cp * (r.ik_p_pos[q] * dv + ps)
+            for k in range(nz):
+                for q in range(c):
+                    i = q
+                    dv = vx[i + 1, j, k] - vx[i, j, k]
+                    ps = r.b_p_neg[q] * fields.psi_p_x_neg[q, j, k] + r.a_p_neg[q] * dv
+                    fields.psi_p_x_neg[q, j, k] = np.float32(ps)
+                    p[i, j, k] -= cp * (r.ik_p_neg[q] * dv + ps)
+                base = nx - c
+                for q in range(c):
+                    i = base + q
+                    dv = vx[i + 1, j, k] - vx[i, j, k]
+                    ps = r.b_p_pos[q] * fields.psi_p_x_pos[q, j, k] + r.a_p_pos[q] * dv
+                    fields.psi_p_x_pos[q, j, k] = np.float32(ps)
+                    p[i, j, k] -= cp * (r.ik_p_pos[q] * dv + ps)
+
+    if axes[1]:
+        for i in range(nx):
+            for k in range(nz):
+                for q in range(c):
+                    j = q
+                    dv = vy[i, j + 1, k] - vy[i, j, k]
+                    ps = r.b_p_neg[q] * fields.psi_p_y_neg[i, q, k] + r.a_p_neg[q] * dv
+                    fields.psi_p_y_neg[i, q, k] = np.float32(ps)
+                    p[i, j, k] -= cp * (r.ik_p_neg[q] * dv + ps)
+                base = ny - c
+                for q in range(c):
+                    j = base + q
+                    dv = vy[i, j + 1, k] - vy[i, j, k]
+                    ps = r.b_p_pos[q] * fields.psi_p_y_pos[i, q, k] + r.a_p_pos[q] * dv
+                    fields.psi_p_y_pos[i, q, k] = np.float32(ps)
+                    p[i, j, k] -= cp * (r.ik_p_pos[q] * dv + ps)
+
+    if axes[2]:
+        for i in range(nx):
+            for j in range(ny):
+                for q in range(c):
+                    kk = q
+                    dv = vz[i, j, kk + 1] - vz[i, j, kk]
+                    ps = r.b_p_neg[q] * fields.psi_p_z_neg[i, j, q] + r.a_p_neg[q] * dv
+                    fields.psi_p_z_neg[i, j, q] = np.float32(ps)
+                    p[i, j, kk] -= cp * (r.ik_p_neg[q] * dv + ps)
+                base = nz - c
+                for q in range(c):
+                    kk = base + q
+                    dv = vz[i, j, kk + 1] - vz[i, j, kk]
+                    ps = r.b_p_pos[q] * fields.psi_p_z_pos[i, j, q] + r.a_p_pos[q] * dv
+                    fields.psi_p_z_pos[i, j, q] = np.float32(ps)
+                    p[i, j, kk] -= cp * (r.ik_p_pos[q] * dv + ps)

@@ -38,9 +38,102 @@ from fdtd.cpml import (  # noqa: E402
     make_cpml_state,
 )
 from fdtd.grid import Fields, Grid, allocate_fields, build_cpml_slabs  # noqa: E402
-from fdtd.kernels import make_update_coeffs, step, step_numpy  # noqa: E402
+from fdtd.kernels import (  # noqa: E402
+    make_update_coeffs,
+    step,
+    step_numpy,
+    update_p,
+    update_v,
+    zero_rigid_face_velocities,
+)
 
 _FLOAT32 = np.dtype(np.float32)
+_CPML_AXIS_X_ONLY = (True, False, False)
+_PROFILE_F32_ATOL = 3e-6
+
+
+def _indices_interface_to_wall(n: int, neg: bool) -> np.ndarray:
+    """Row indices in order from CPML/interior interface toward the outer wall."""
+    if neg:
+        return np.arange(n - 1, -1, -1, dtype=int)
+    return np.arange(n, dtype=int)
+
+
+def _profile_b_a_at_d(
+    d_over_L: float,
+    *,
+    sigma_max: float,
+    kappa_max: float,
+    alpha_max: float,
+    m: float,
+    dt: float,
+) -> tuple[float, float]:
+    """``(b, a)`` at normalized depth *d_over_L* (matches :func:`fdtd.cpml._profile_row`)."""
+    d_over_L = min(max(d_over_L, 0.0), 1.0)
+    power = d_over_L**m
+    sigma = sigma_max * power
+    kappa = 1.0 + (kappa_max - 1.0) * power
+    alpha = alpha_max * (1.0 - d_over_L)
+    decay = sigma / kappa + alpha
+    b = math.exp(-decay * dt)
+    if abs(sigma) < 1e-30:
+        a = 0.0
+    else:
+        denom = sigma * kappa + kappa * kappa * alpha
+        a = sigma / denom * (b - 1.0)
+    return b, a
+
+
+def _assert_profile_b_a_monotone(
+    b: np.ndarray,
+    a: np.ndarray,
+    *,
+    neg: bool,
+    interface_q: int,
+    interface_b: float,
+    interface_a: float,
+) -> None:
+    """Interface ``(b, a)`` as given; *b* falls and ``|a|`` rises toward the wall."""
+    n = len(b)
+    assert len(a) == n
+    order = _indices_interface_to_wall(n, neg)
+    b_ord = b[order].astype(np.float64)
+    a_ord = a[order].astype(np.float64)
+    tol = _PROFILE_F32_ATOL
+
+    assert b[interface_q] == pytest.approx(interface_b, abs=tol)
+    assert a[interface_q] == pytest.approx(interface_a, abs=tol)
+    assert np.all(a_ord <= tol)
+    assert np.all(np.diff(-b_ord) >= -tol), "b must be non-increasing toward the wall"
+    assert np.all(np.diff(np.abs(a_ord)) >= -tol), "|a| must be non-decreasing toward the wall"
+
+
+def _sigma_v_profile(
+    n_cells: int, neg: bool, sigma_max: float, m: float
+) -> np.ndarray:
+    """σ(d) on velocity faces (matches :func:`fdtd.cpml._profile_row_v` depths)."""
+    denom = max(n_cells, 1)
+    out = np.empty(n_cells + 1, dtype=np.float64)
+    for q in range(n_cells + 1):
+        d = (n_cells - q) / denom if neg else q / denom
+        d = min(max(d, 0.0), 1.0)
+        out[q] = sigma_max * d**m
+    return out
+
+
+def _depths_p(n_cells: int, neg: bool) -> np.ndarray:
+    if neg:
+        q = np.arange(n_cells, dtype=np.float64)
+        return (n_cells - q - 0.5) / n_cells
+    q = np.arange(n_cells, dtype=np.float64)
+    return (q + 0.5) / n_cells
+
+
+def _depths_v(n_cells: int, neg: bool) -> np.ndarray:
+    q = np.arange(n_cells + 1, dtype=np.float64)
+    if neg:
+        return (n_cells - q) / n_cells
+    return q / n_cells
 
 
 def _copy_fields(dst: Fields, src: Fields) -> None:
@@ -95,6 +188,85 @@ def _grid(
     g = Grid(cfg, d)
     g.cpml_slabs = build_cpml_slabs(n, n, n, cpml)
     return g, d, cfg, d
+
+
+def _grid_aniso(
+    nx: int,
+    ny: int,
+    nz: int,
+    *,
+    cpml: int,
+    cpml_R: float = 1e-6,
+    cpml_m: float = 3.0,
+    cpml_alpha_factor: float = 1.0,
+    cpml_kappa_max: float = 1.0,
+) -> tuple[Grid, object, Config, object]:
+    num = Numerics(
+        cpml_cells=cpml,
+        gap_cells=0,
+        ppw=12.0,
+        cfl_safety=0.99,
+        cell_budget=10**9,
+        cpml_R=cpml_R,
+        cpml_m=cpml_m,
+        cpml_alpha_factor=cpml_alpha_factor,
+        cpml_kappa_max=cpml_kappa_max,
+    )
+    cfg = Config(
+        box=None,
+        air=Air(c=343.0, rho=1.204),
+        radiator=Radiator("circle", dims=[0.01]),
+        band=Band(f_min=20.0, f_max=4_000.0),
+        numerics=num,
+        output=Output(path="/tmp/cpml_duct_test.h5"),
+    )
+    d = derive(cfg)
+    d.nx, d.ny, d.nz = nx, ny, nz
+    d.cpml_cells = cpml
+    _sync_dt(cfg, d)
+    g = Grid(cfg, d)
+    g.cpml_slabs = build_cpml_slabs(nx, ny, nz, cpml)
+    return g, d, cfg, d
+
+
+def _step_cpml_axes(
+    fields: Fields,
+    coeffs: object,
+    slabs: object,
+    cpml: CpmlState,
+    axes: tuple[bool, bool, bool],
+) -> None:
+    nx, ny, nz = fields.p.shape
+    zero_rigid_face_velocities(fields.vx, fields.vy, fields.vz)
+    update_v(
+        fields.p,
+        fields.vx,
+        fields.vy,
+        fields.vz,
+        coeffs.cv,
+        0,
+        nx,
+        0,
+        ny,
+        0,
+        nz,
+    )
+    apply_v(fields, cpml, coeffs, axes=axes)
+    zero_rigid_face_velocities(fields.vx, fields.vy, fields.vz)
+    update_p(
+        fields.p,
+        fields.vx,
+        fields.vy,
+        fields.vz,
+        coeffs.cp,
+        0,
+        nx,
+        0,
+        ny,
+        0,
+        nz,
+    )
+    apply_p(fields, cpml, coeffs, axes=axes)
 
 
 def _inactive_cpml_state(c: int) -> CpmlState:
@@ -418,7 +590,7 @@ def test_sigma_max_dt_at_outer_wall_in_range():
 
 
 def test_profile_orientation_monotone_to_wall():
-    """σ, κ−1, (1−α/α_max) vanish at the interior interface and peak at the wall."""
+    """Profile scalars vanish at d/L=0; *v* has b=1,a=0 there; *p* at d/L=1/(2n) does not."""
     cpml = 6
     n = 24
     g, d, cfg, _ = _grid(n, cpml=cpml)
@@ -440,7 +612,7 @@ def test_profile_orientation_monotone_to_wall():
             alpha_max=alpha_max, m=m, dt=d.dt,
         )
         b_v, a_v, ik_v = _profile_row_v(
-            cpml + 1, neg=neg, sigma_max=sigma_max, kappa_max=kappa_max,
+            cpml, neg=neg, sigma_max=sigma_max, kappa_max=kappa_max,
             alpha_max=alpha_max, m=m, dt=d.dt,
         )
         assert _raw(0.0)[0] == pytest.approx(0.0)
@@ -456,14 +628,348 @@ def test_profile_orientation_monotone_to_wall():
         else:
             assert float(ik_p[-1]) > float(ik_p[0])
             assert float(ik_v[-1]) > float(ik_v[0])
-        if neg:
-            assert float(a_p[0]) < float(a_p[-1])
-            assert float(b_p[0]) < float(b_p[-1])
-            assert float(a_v[0]) < float(a_v[-1])
+
+        q_if_p = cpml - 1 if neg else 0
+        q_if_v = cpml if neg else 0
+        d_p_if = 1.0 / (2.0 * cpml)
+        b_p_if, a_p_if = _profile_b_a_at_d(
+            d_p_if,
+            sigma_max=sigma_max,
+            kappa_max=kappa_max,
+            alpha_max=alpha_max,
+            m=m,
+            dt=d.dt,
+        )
+        assert b_p_if < 1.0
+        assert a_p_if < 0.0
+        _assert_profile_b_a_monotone(
+            b_p,
+            a_p,
+            neg=neg,
+            interface_q=q_if_p,
+            interface_b=b_p_if,
+            interface_a=a_p_if,
+        )
+        
+        # v interface face: σ = 0 but α = α_max there, so b = exp(-α_max·dt), a = 0
+        b_v_if, a_v_if = _profile_b_a_at_d(
+            0.0, sigma_max=sigma_max, kappa_max=kappa_max,
+            alpha_max=alpha_max, m=m, dt=d.dt,
+        )
+        _assert_profile_b_a_monotone(
+            b_v,
+            a_v,
+            neg=neg,
+            interface_q=q_if_v,
+            interface_b=b_v_if,
+            interface_a=a_v_if,
+        )
+
+
+def test_sigma_v_zero_at_interface_on_all_faces():
+    """Velocity σ vanishes at the CPML/interior interface and peaks at the wall."""
+    cpml = 16
+    n = 48
+    g, d, cfg, _ = _grid(n, cpml=cpml, cpml_alpha_factor=0.0)
+    sigma_max = build_cpml_coeffs(g, cfg, d, d.dt).sigma_max
+    m = cfg.numerics.cpml_m
+    faces = (
+        ("x_neg", True),
+        ("x_pos", False),
+        ("y_neg", True),
+        ("y_pos", False),
+        ("z_neg", True),
+        ("z_pos", False),
+    )
+    for _name, neg in faces:
+        sig = _sigma_v_profile(cpml, neg, sigma_max, m)
+        q_if = cpml if neg else 0
+        q_wall = 0 if neg else cpml
+        assert sig[q_if] == pytest.approx(0.0, abs=1e-30)
+        assert sig[q_wall] == pytest.approx(sigma_max, rel=1e-6)
+
+
+def test_p_v_depths_interleave_uniformly():
+    cpml = 16
+    spacing = 1.0 / (2 * cpml)
+    for neg in (True, False):
+        merged = np.sort(
+            np.concatenate([_depths_p(cpml, neg), _depths_v(cpml, neg)])
+        )
+        assert merged[0] == pytest.approx(0.0, abs=1e-12)
+        assert merged[-1] == pytest.approx(1.0, abs=1e-12)
+        np.testing.assert_allclose(np.diff(merged), spacing, rtol=0.0, atol=1e-12)
+
+
+def _init_x_plane_wave(
+    f: Fields,
+    *,
+    nx: int,
+    ny: int,
+    nz: int,
+    i_src: int,
+    sigma_cells: float,
+    rho: float,
+    c_air: float,
+) -> None:
+    """Gaussian envelope in x, uniform over y–z, travelling +x (p and vx matched)."""
+    ii = np.arange(nx, dtype=np.float64)
+    env = np.exp(-0.5 * ((ii - i_src) / sigma_cells) ** 2).astype(_FLOAT32)
+    z = np.float32(1.0 / (rho * c_air))
+    for j in range(ny):
+        for k in range(nz):
+            f.p[:, j, k] = env
+            f.vy[:, j, k] = 0.0
+            f.vz[:, j, k] = 0.0
+            f.vx[0, j, k] = 0.0
+            for i in range(nx):
+                f.vx[i + 1, j, k] = z * f.p[i, j, k]
+            f.vx[nx, j, k] = z * f.p[nx - 1, j, k]
+
+
+_DUCT_WIN_TAIL_CELLS = 10.0
+_DUCT_END_TAPER_FRAC = 0.25
+_DUCT_FFT_PAD_FACTOR = 8
+
+
+def _causal_end_taper(n: int, *, taper_frac: float = _DUCT_END_TAPER_FRAC) -> np.ndarray:
+    """Unit gain at the start; raised-cosine taper on the last samples only (C3-style)."""
+    if n <= 1:
+        return np.ones(max(n, 1), dtype=np.float64)
+    w = np.ones(n, dtype=np.float64)
+    nt = int(max(1, math.floor(taper_frac * n)))
+    nt = min(nt, n - 1)
+    if nt <= 0:
+        return w
+    x = np.linspace(0.0, math.pi, nt)
+    w[-nt:] = 0.5 * (1.0 + np.cos(x))
+    return w
+
+
+def _pulse_arrival_window_s(
+    t_arrival: float, sigma_t: float, *, margin_s: float
+) -> tuple[float, float]:
+    """``[arrival − 3σ_t, arrival + 3σ_t + margin]``."""
+    return t_arrival - 3.0 * sigma_t, t_arrival + 3.0 * sigma_t + margin_s
+
+
+def _windows_overlap(win_a: tuple[float, float], win_b: tuple[float, float]) -> bool:
+    return win_a[1] > win_b[0] and win_b[1] > win_a[0]
+
+
+def _duct_place_probe_clear_gates(
+    *,
+    nx: int,
+    cpml: int,
+    i_src: int,
+    i_rec: int,
+    h: float,
+    c_air: float,
+    sigma_t: float,
+    margin_s: float,
+    min_src_rec_cells: int = 32,
+) -> tuple[int, int, float, float, tuple[float, float], tuple[float, float]]:
+    """Return ``(nx, i_rec)`` so incident and reflection gate windows do not overlap."""
+    min_sep = 6.0 * sigma_t + margin_s
+    t_inc0 = (i_rec - i_src) * h / c_air
+    t_refl0 = t_inc0 + 2.0 * (nx - cpml - i_rec) * h / c_air
+    win_i0 = _pulse_arrival_window_s(t_inc0, sigma_t, margin_s=margin_s)
+    win_r0 = _pulse_arrival_window_s(t_refl0, sigma_t, margin_s=margin_s)
+
+    nx_out, i_rec_out = nx, i_rec
+    adjusted = False
+    for _ in range(10_000):
+        t_inc = (i_rec_out - i_src) * h / c_air
+        dist_pos_if = (nx_out - cpml - i_rec_out) * h
+        t_refl = t_inc + 2.0 * dist_pos_if / c_air
+        win_i = _pulse_arrival_window_s(t_inc, sigma_t, margin_s=margin_s)
+        win_r = _pulse_arrival_window_s(t_refl, sigma_t, margin_s=margin_s)
+        if not _windows_overlap(win_i, win_r):
+            if adjusted:
+                print(
+                    "duct CPML: cleared overlapping gates — "
+                    f"nx={nx_out}, i_rec={i_rec_out}, "
+                    f"t_inc={t_inc * 1e3:.3f} ms, t_refl={t_refl * 1e3:.3f} ms"
+                )
+            return nx_out, i_rec_out, t_inc, t_refl, win_i, win_r
+        moved = False
+        min_i_rec = i_src + min_src_rec_cells
+        if i_rec_out > min_i_rec:
+            i_rec_out -= 1
+            moved = True
+            adjusted = True
+            print(
+                "duct CPML: gate overlap — moving probe toward −x "
+                f"(i_rec → {i_rec_out}, larger +x round-trip)"
+            )
         else:
-            assert float(a_p[-1]) < float(a_p[0])
-            assert float(b_p[-1]) < float(b_p[0])
-            assert float(a_v[-1]) < float(a_v[0])
+            nx_out += max(32, int(math.ceil(min_sep * c_air / (2.0 * h))))
+            if i_rec_out < nx_out - cpml - 16:
+                i_rec_out = nx_out - cpml - 16
+            moved = True
+            adjusted = True
+            print(
+                "duct CPML: gate overlap — lengthening duct "
+                f"(nx → {nx_out}, i_rec → {i_rec_out})"
+            )
+        if not moved:
+            break
+
+    raise AssertionError(
+        "duct gate windows overlap after geometry adjustment; "
+        f"inc {[win_i0[0], win_i0[1]]} vs refl {[win_r0[0], win_r0[1]]}"
+    )
+
+
+def _gated_segment_causal(
+    trace: np.ndarray, dt: float, t_lo: float, t_hi: float
+) -> np.ndarray:
+    """Sample ``[t_lo, t_hi)`` with causal end taper only (window length not rounded)."""
+    n = len(trace)
+    i0 = max(0, int(math.floor(t_lo / dt)))
+    i1 = min(n, int(math.ceil(t_hi / dt)))
+    if i1 <= i0:
+        i1 = min(n, i0 + 1)
+    seg = trace[i0:i1].astype(np.float64)
+    return seg * _causal_end_taper(len(seg))
+
+
+def _rfft_pair_zero_padded(
+    seg_inc: np.ndarray, seg_refl: np.ndarray, dt: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Zero-pad both segments to a common ``n_fft`` (≥ pad factor × longest window)."""
+    n_long = max(len(seg_inc), len(seg_refl), 1)
+    n_fft = max(64, _DUCT_FFT_PAD_FACTOR * n_long)
+    pad_inc = np.zeros(n_fft, dtype=np.float64)
+    pad_refl = np.zeros(n_fft, dtype=np.float64)
+    pad_inc[: len(seg_inc)] = seg_inc
+    pad_refl[: len(seg_refl)] = seg_refl
+    freqs = np.fft.rfftfreq(n_fft, dt)
+    return freqs, np.fft.rfft(pad_inc), np.fft.rfft(pad_refl)
+
+
+def _duct_reflection_spectrum(
+    cpml_R: float,
+    *,
+    f_lo: float = 200.0,
+    f_hi: float = 2_500.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    cpml = 16
+    nx_init, ny, nz = 400, 4, 4
+    sigma_cells = 8.0
+    i_src = cpml + 48
+
+    g, d, cfg, _ = _grid_aniso(
+        nx_init,
+        ny,
+        nz,
+        cpml=cpml,
+        cpml_R=cpml_R,
+        cpml_m=3.0,
+        cpml_kappa_max=1.0,
+        cpml_alpha_factor=0.0,
+    )
+    h = d.h
+    c_air = cfg.air.c
+    dt = d.dt
+    sigma_t = sigma_cells * h / c_air
+    margin_s = _DUCT_WIN_TAIL_CELLS * h / c_air
+    i_rec_init = nx_init - cpml - 20
+    nx, i_rec, t_inc, t_refl, win_inc, win_refl = _duct_place_probe_clear_gates(
+        nx=nx_init,
+        cpml=cpml,
+        i_src=i_src,
+        i_rec=i_rec_init,
+        h=h,
+        c_air=c_air,
+        sigma_t=sigma_t,
+        margin_s=margin_s,
+    )
+    if nx != nx_init:
+        g, d, cfg, _ = _grid_aniso(
+            nx,
+            ny,
+            nz,
+            cpml=cpml,
+            cpml_R=cpml_R,
+            cpml_m=3.0,
+            cpml_kappa_max=1.0,
+            cpml_alpha_factor=0.0,
+        )
+        h = d.h
+        dt = d.dt
+        sigma_t = sigma_cells * h / c_air
+        margin_s = _DUCT_WIN_TAIL_CELLS * h / c_air
+        nx, i_rec, t_inc, t_refl, win_inc, win_refl = _duct_place_probe_clear_gates(
+            nx=nx,
+            cpml=cpml,
+            i_src=i_src,
+            i_rec=i_rec,
+            h=h,
+            c_air=c_air,
+            sigma_t=sigma_t,
+            margin_s=margin_s,
+        )
+
+    coeffs = make_update_coeffs(cfg.air.rho, cfg.air.c, d.h, d.dt)
+    cpml_st = make_cpml_state(g, cfg, d, d.dt)
+    slabs = g.cpml_slabs
+    f = allocate_fields(g)
+    _init_x_plane_wave(
+        f,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        i_src=i_src,
+        sigma_cells=sigma_cells,
+        rho=cfg.air.rho,
+        c_air=cfg.air.c,
+    )
+
+    t_record_end = win_refl[1] + margin_s
+    n_steps = max(256, int(math.ceil(t_record_end / dt)) + 8)
+    assert n_steps * dt >= win_refl[1], "simulation ends before reflected gate window"
+
+    hist: list[float] = []
+    for _ in range(n_steps):
+        _step_cpml_axes(f, coeffs, slabs, cpml_st, _CPML_AXIS_X_ONLY)
+        hist.append(float(f.p[i_rec, ny // 2, nz // 2]))
+
+    trace = np.asarray(hist, dtype=np.float64)
+    seg_inc = _gated_segment_causal(trace, dt, win_inc[0], win_inc[1])
+    seg_refl = _gated_segment_causal(trace, dt, win_refl[0], win_refl[1])
+    freqs, spec_i, spec_r = _rfft_pair_zero_padded(seg_inc, seg_refl, dt)
+    band = (freqs >= f_lo) & (freqs <= f_hi)
+    ratio = np.abs(spec_r[band]) / (np.abs(spec_i[band]) + 1e-30)
+    r_db = 20.0 * np.log10(ratio)
+    return freqs[band], r_db
+
+
+@pytest.mark.slow
+def test_duct_plane_wave_x_cpml_reflection():
+    """1-D duct with CPML on ±x only; spectral reflection ≤ −50 dB at R=1e-4."""
+    results: dict[float, tuple[np.ndarray, np.ndarray]] = {}
+    for cpml_R in (1e-4, 1e-3, 1e-6):
+        freqs, r_db = _duct_reflection_spectrum(cpml_R)
+        results[cpml_R] = (freqs, r_db)
+        lines = [
+            f"  f={f:.0f} Hz  R(f)={db:6.2f} dB"
+            for f, db in zip(freqs, r_db)
+        ]
+        print(f"duct CPML R={cpml_R:.0e} (max {float(np.max(r_db)):.2f} dB)\n"
+              + "\n".join(lines[:12])
+              + (f"\n  ... ({len(lines)} freqs total)" if len(lines) > 12 else ""))
+
+    _f, r_main = results[1e-4]
+    assert float(np.max(r_main)) <= -50.0, (
+        f"duct +x CPML reflection {float(np.max(r_main)):.2f} dB exceeds −50 dB"
+    )
+    max_3 = float(np.max(results[1e-3][1]))
+    max_6 = float(np.max(results[1e-6][1]))
+    assert max_6 <= max_3 + 2.0, (
+        f"σ_max sweep worsens with smaller R: 1e-6 → {max_6:.2f} dB, "
+        f"1e-3 → {max_3:.2f} dB"
+    )
 
 
 def test_vx_neg_stencil_index_mapping_delta():
