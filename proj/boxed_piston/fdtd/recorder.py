@@ -1,0 +1,563 @@
+"""Chunked HDF5 recording for box / radiator FDTD runs (Stage C)."""
+
+from __future__ import annotations
+
+import json
+import math
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from fdtd.config import Config, Derived
+from fdtd.grid import Fields, Grid
+from fdtd.post.kirchhoff import box_surface_patches, huygens_box_patches
+from fdtd.source import BoxBoundary, velocity_at_half_step, velocity_pulse
+
+try:
+    import h5py
+except ImportError:  # pragma: no cover
+    h5py = None  # type: ignore[assignment]
+
+_F64 = np.float64
+_F32 = np.float32
+_BUFFER_SAMPLES = 256
+_CONVENTIONS = "e^{+jωt}; p at integer steps, v at half steps"
+_PULSE_BANDLIMIT_NOTE = (
+    "Pulse band-limits content (−40 dB at 1.2·f_max); decimation at 2.5·f_max is lossless in band"
+)
+_DEFAULT_HUYGENS_OFFSET_CELLS = 3
+_STENCIL_W4 = np.array([-1.0, 9.0, 9.0, -1.0], dtype=_F64) / 16.0
+
+
+def decimation_factor(f_max: float, dt: float) -> int:
+    """M = floor(1 / (2.5·f_max·Δt)), at least 1."""
+    return max(1, int(math.floor(1.0 / (2.5 * float(f_max) * float(dt)))))
+
+
+def velocity_pulse_derivative(t: float, sigma: float, t0: float) -> float:
+    """Time derivative of :func:`fdtd.source.velocity_pulse` (analytic Gaussian)."""
+    z = (t - float(t0)) / float(sigma)
+    return float(velocity_pulse(t, sigma, t0) * (-z / float(sigma)))
+
+
+def resolve_huygens_offset(cfg: Config) -> int:
+    """Huygens surface offset in cells (config override with default 3)."""
+    num = cfg.numerics
+    val = getattr(num, "huygens_offset_cells", None)
+    return _DEFAULT_HUYGENS_OFFSET_CELLS if val is None else int(val)
+
+
+def validate_huygens_clearance(derived: Derived, offset_cells: int) -> None:
+    """Raise ``ValueError`` if Huygens offset is too small or enters the CPML."""
+    if offset_cells < 2:
+        raise ValueError(
+            f"huygens offset {offset_cells} cells < 2 (stencil needs two p cells each side)"
+        )
+    clearance = derived.gap_cells - offset_cells
+    if clearance < 2:
+        raise ValueError(
+            f"huygens offset {offset_cells} leaves {clearance} cells to CPML/gap "
+            f"(need ≥ 2; gap_cells={derived.gap_cells})"
+        )
+
+
+def _require_h5py() -> Any:
+    if h5py is None:
+        raise ImportError(
+            "h5py is required for fdtd.recorder but is not installed in this environment"
+        )
+    return h5py
+
+
+def _box_origin(grid: Grid) -> tuple[float, float, float]:
+    cfg = grid.cfg
+    xc = float(cfg.radiator.x_c)
+    yc = float(cfg.radiator.y_c)
+    return (
+        -xc - 0.5 * grid.realized_W,
+        -yc - 0.5 * grid.realized_H,
+        -grid.realized_D,
+    )
+
+
+def _p_index_from_xyz(
+    grid: Grid,
+    x: float,
+    y: float,
+    z: float,
+    *,
+    ib: int,
+    jb: int,
+    kb: int,
+) -> tuple[int, int, int]:
+    ox, oy, oz = _box_origin(grid)
+    h = grid.h
+    i = ib + int(round((float(x) - ox) / h - 0.5))
+    j = jb + int(round((float(y) - oy) / h - 0.5))
+    k = kb + int(round((float(z) - oz) / h - 0.5))
+    return i, j, k
+
+
+def _assert_in_p(grid: Grid, i: int, j: int, k: int) -> int:
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    if not (0 <= i < nx and 0 <= j < ny and 0 <= k < nz):
+        raise ValueError(f"p index ({i},{j},{k}) out of bounds for grid {nx}×{ny}×{nz}")
+    return int(np.ravel_multi_index((i, j, k), (nx, ny, nz)))
+
+
+def _v_index_from_normal(
+    grid: Grid,
+    center: np.ndarray,
+    normal: np.ndarray,
+    *,
+    ib: int,
+    jb: int,
+    kb: int,
+) -> tuple[int, float]:
+    """Flat staggered velocity index and sign so v_n is positive outward."""
+    ox, oy, oz = _box_origin(grid)
+    h = grid.h
+    n = normal / max(np.linalg.norm(normal), 1e-30)
+    axis = int(np.argmax(np.abs(n)))
+    sgn = 1.0 if n[axis] > 0.0 else -1.0
+    x, y, z = float(center[0]), float(center[1]), float(center[2])
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    if axis == 0:
+        i = ib + int(round((x - ox) / h))
+        j = jb + int(round((y - oy) / h - 0.5))
+        k = kb + int(round((z - oz) / h - 0.5))
+        i = max(0, min(nx, i))
+        j = max(0, min(ny - 1, j))
+        k = max(0, min(nz - 1, k))
+        flat = int(np.ravel_multi_index((i, j, k), (nx + 1, ny, nz)))
+        return flat, sgn
+    if axis == 1:
+        i = ib + int(round((x - ox) / h - 0.5))
+        j = jb + int(round((y - oy) / h))
+        k = kb + int(round((z - oz) / h - 0.5))
+        i = max(0, min(nx - 1, i))
+        j = max(0, min(ny, j))
+        k = max(0, min(nz - 1, k))
+        flat = int(np.ravel_multi_index((i, j, k), (nx, ny + 1, nz)))
+        return flat, sgn
+    i = ib + int(round((x - ox) / h - 0.5))
+    j = jb + int(round((y - oy) / h - 0.5))
+    k = kb + int(round((z - oz) / h))
+    i = max(0, min(nx - 1, i))
+    j = max(0, min(ny - 1, j))
+    k = max(0, min(nz, k))
+    flat = int(np.ravel_multi_index((i, j, k), (nx, ny, nz + 1)))
+    return flat, sgn
+
+
+def _p_stencil_indices(
+    grid: Grid,
+    center: np.ndarray,
+    normal: np.ndarray,
+    *,
+    ib: int,
+    jb: int,
+    kb: int,
+) -> np.ndarray:
+    """Four flat ``p`` indices at ±3h/2, ±h/2 along outward normal (order 4 rule)."""
+    n = normal / max(np.linalg.norm(normal), 1e-30)
+    h = grid.h
+    offs = np.array([-1.5, -0.5, 0.5, 1.5], dtype=_F64) * h
+    flat = np.empty(4, dtype=np.int64)
+    for q, d_along in enumerate(offs):
+        pos = center + d_along * n
+        i, j, k = _p_index_from_xyz(grid, pos[0], pos[1], pos[2], ib=ib, jb=jb, kb=kb)
+        flat[q] = _assert_in_p(grid, i, j, k)
+    return flat
+
+
+def _build_huygens_gathers(
+    grid: Grid,
+    patches,
+    *,
+    ib: int,
+    jb: int,
+    kb: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    n = patches.centers.shape[0]
+    idx4 = np.empty((n, 4), dtype=np.int64)
+    idx_v = np.empty(n, dtype=np.int64)
+    sgn_v = np.empty(n, dtype=_F32)
+    v_axis = np.empty(n, dtype=np.int8)
+    for q in range(n):
+        c = patches.centers[q]
+        n_hat = patches.normals[q]
+        idx4[q] = _p_stencil_indices(grid, c, n_hat, ib=ib, jb=jb, kb=kb)
+        iv, sv = _v_index_from_normal(grid, c, n_hat, ib=ib, jb=jb, kb=kb)
+        idx_v[q] = iv
+        sgn_v[q] = np.float32(sv)
+        v_axis[q] = np.int8(np.argmax(np.abs(n_hat)))
+    return idx4, idx_v, sgn_v, v_axis
+
+
+def _build_box_surface_gathers(
+    grid: Grid,
+    boundary: BoxBoundary,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per box-surface patch: flat ``p`` index, radiator local index (−1 if rigid)."""
+    assert grid.i_box is not None and grid.j_box is not None and grid.k_box is not None
+    assert grid.k_face_z is not None
+    ib, jb, kb = grid.i_box, grid.j_box, grid.k_box
+    kf = grid.k_face_z
+    patches = box_surface_patches(
+        grid.realized_W,
+        grid.realized_H,
+        grid.realized_D,
+        grid.h,
+        _box_origin(grid),
+    )
+    n = patches.centers.shape[0]
+    n_rad = boundary.idx_radiator.size
+    rad_ij: dict[tuple[int, int], int] = {}
+    if n_rad and grid.radiator_face_indices is not None:
+        ir, jr, _ = grid.radiator_face_indices
+        for q in range(n_rad):
+            rad_ij[(int(ir[q]), int(jr[q]))] = q
+
+    idx_p = np.empty(n, dtype=np.int64)
+    rad_local = np.full(n, -1, dtype=np.int64)
+    h = grid.h
+
+    for q in range(n):
+        c = patches.centers[q]
+        n_hat = patches.normals[q]
+        n_u = n_hat / max(np.linalg.norm(n_hat), 1e-30)
+        pos = c + 0.5 * h * n_u
+        i, j, k = _p_index_from_xyz(grid, pos[0], pos[1], pos[2], ib=ib, jb=jb, kb=kb)
+        idx_p[q] = _assert_in_p(grid, i, j, k)
+        axis = int(np.argmax(np.abs(n_u)))
+        if axis == 2 and n_u[2] > 0.0:
+            key = (i, j)
+            if key in rad_ij:
+                rad_local[q] = rad_ij[key]
+
+    return patches, idx_p, rad_local
+
+
+class _ChunkWriter:
+    """Append rows to a 2-D HDF5 dataset in chunks of at most ``buf_rows``."""
+
+    def __init__(self, dset, buf_rows: int) -> None:
+        self._dset = dset
+        self._buf_rows = buf_rows
+        self._buf = np.empty((buf_rows,) + dset.shape[1:], dtype=dset.dtype)
+        self._n = 0
+        self._written = 0
+
+    @property
+    def max_buffer_bytes(self) -> int:
+        return int(self._buf.nbytes)
+
+    def append(self, row: np.ndarray | float) -> None:
+        if np.isscalar(row):
+            self._buf[self._n] = row
+        else:
+            self._buf[self._n] = row
+        self._n += 1
+        if self._n >= self._buf_rows:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._n == 0:
+            return
+        start = self._written
+        new_len = start + self._n
+        if new_len > self._dset.shape[0]:
+            self._dset.resize(new_len, axis=0)
+        self._dset[start:new_len] = self._buf[: self._n]
+        self._written = new_len
+        self._n = 0
+
+    def close(self) -> None:
+        self.flush()
+
+
+class Recorder:
+    """Incremental HDF5 writer; call :meth:`sample` once per integer step after :func:`step`."""
+
+    def __init__(
+        self,
+        cfg: Config,
+        derived: Derived,
+        grid: Grid,
+        boundary: BoxBoundary,
+        path: str | Path,
+        *,
+        offset_cells: int | None = None,
+        buffer_samples: int = _BUFFER_SAMPLES,
+    ) -> None:
+        h5 = _require_h5py()
+        if grid.cfg.box is None:
+            raise ValueError("Recorder requires a box geometry")
+        offset = resolve_huygens_offset(cfg) if offset_cells is None else int(offset_cells)
+        validate_huygens_clearance(derived, offset)
+
+        self.cfg = cfg
+        self.derived = derived
+        self.grid = grid
+        self.boundary = boundary
+        self.h = float(derived.h)
+        self.dt = float(derived.dt)
+        self.rho = float(cfg.air.rho)
+        self.sigma = float(derived.pulse_sigma)
+        self.t0 = float(derived.pulse_t0)
+        self.decim = decimation_factor(derived.f_max, derived.dt)
+        self._offset = offset
+        self._zrad_source = "analytic_baffled" if derived.zrad_fallback else "fdtd"
+
+        assert grid.i_box is not None and grid.j_box is not None and grid.k_box is not None
+        ib, jb, kb = grid.i_box, grid.j_box, grid.k_box
+        origin = _box_origin(grid)
+        huygens_patches = huygens_box_patches(
+            grid.realized_W,
+            grid.realized_H,
+            grid.realized_D,
+            grid.h,
+            origin,
+            offset_cells=offset,
+        )
+        (
+            self._huygens_idx4,
+            self._huygens_iv,
+            self._huygens_vsgn,
+            self._huygens_vaxis,
+        ) = _build_huygens_gathers(grid, huygens_patches, ib=ib, jb=jb, kb=kb)
+        box_patches, self._box_idx_p, self._box_rad_local = _build_box_surface_gathers(
+            grid, boundary
+        )
+        self._n_huy = self._huygens_idx4.shape[0]
+        self._n_box = box_patches.centers.shape[0]
+
+        self._rad_p_idx = np.empty(boundary.idx_radiator.size, dtype=np.int64)
+        if boundary.idx_radiator.size:
+            vz_shape = (grid.nx, grid.ny, grid.nz + 1)
+            ir, jr, kr = np.unravel_index(boundary.idx_radiator, vz_shape)
+            kf = int(grid.k_face_z)
+            self._rad_p_idx = np.ravel_multi_index(
+                (ir, jr, np.full_like(ir, kf)), (grid.nx, grid.ny, grid.nz)
+            )
+        self._rad_w = boundary.w_radiator.astype(_F64)
+        self._rad_w_sum = float(np.sum(self._rad_w)) if self._rad_w.size else 1.0
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
+        self._file = h5.File(path, "w")
+        self._step = 0
+        self._buf_samples = int(buffer_samples)
+
+        self._write_static_meta(box_patches, huygens_patches)
+        self._init_datasets()
+
+    @property
+    def decimation(self) -> int:
+        return self.decim
+
+    @property
+    def max_buffer_bytes(self) -> int:
+        """Upper bound on simultaneous sample buffering (for memory tests)."""
+        parts = [
+            self._w_v_int.max_buffer_bytes,
+            self._w_v_half.max_buffer_bytes,
+            self._w_p_avg.max_buffer_bytes,
+            self._w_h_p.max_buffer_bytes,
+            self._w_h_vn.max_buffer_bytes,
+            self._w_h_tp.max_buffer_bytes,
+            self._w_h_tvn.max_buffer_bytes,
+            self._w_b_p.max_buffer_bytes,
+            self._w_b_t.max_buffer_bytes,
+        ]
+        return int(sum(parts))
+
+    def _write_static_meta(self, box_patches, huygens_patches) -> None:
+        meta = self._file.create_group("meta")
+        meta.attrs["conventions"] = _CONVENTIONS
+        meta.attrs["zrad_source"] = self._zrad_source
+        meta.attrs["decimation_factor"] = self.decim
+        meta.attrs["decimation_note"] = _PULSE_BANDLIMIT_NOTE
+        meta.attrs["h"] = self.h
+        meta.attrs["dt"] = self.dt
+        meta.attrs["huygens_offset_cells"] = self._offset
+        meta.create_dataset(
+            "config_json",
+            data=np.asarray(self.cfg.to_json(), dtype="S"),
+        )
+        derived_blob = json.dumps(asdict(self.derived))
+        meta.create_dataset("derived_json", data=np.asarray(derived_blob, dtype="S"))
+
+        rad = self._file.create_group("radiator")
+        rad.attrs["description"] = "Unit pulse v(t); area-weighted radiator face pressure p_avg"
+        rad.attrs["v_integer_times"] = "t_n = n·Δt"
+        rad.attrs["v_half_times"] = "t_{n+½} = (n+½)·Δt"
+        rad.attrs["p_avg_times"] = "t_n = n·Δt (every step)"
+
+        huy = self._file.create_group("huygens")
+        for name, arr in (
+            ("centers", huygens_patches.centers),
+            ("normals", huygens_patches.normals),
+            ("areas", huygens_patches.areas),
+        ):
+            huy.create_dataset(name, data=arr.astype(_F64), compression="gzip")
+        huy.attrs["p_times"] = "integer steps n·Δt, decimated n ≡ 0 (mod M)"
+        huy.attrs["vn_times"] = "half steps (n+½)·Δt, decimated when n ≡ 0 (mod M)"
+
+        box = self._file.create_group("box_surface")
+        for name, arr in (
+            ("centers", box_patches.centers),
+            ("normals", box_patches.normals),
+            ("areas", box_patches.areas),
+        ):
+            box.create_dataset(name, data=arr.astype(_F64), compression="gzip")
+        box.attrs["p_times"] = "integer steps n·Δt, decimated n ≡ 0 (mod M)"
+
+    def _create_extensible(
+        self,
+        group,
+        name: str,
+        tail_shape: tuple[int, ...],
+        dtype,
+        chunk0: int,
+    ):
+        shape = (0,) + tail_shape
+        maxshape = (None,) + tail_shape
+        chunks = (min(chunk0, 64),) + tail_shape
+        return group.create_dataset(
+            name,
+            shape=shape,
+            maxshape=maxshape,
+            dtype=dtype,
+            chunks=chunks,
+            compression="gzip",
+        )
+
+    def _init_datasets(self) -> None:
+        rad = self._file["radiator"]
+        buf = self._buf_samples
+        self._ds_v_int = self._create_extensible(rad, "v_pulse_integer", (), _F64, buf)
+        self._ds_v_half = self._create_extensible(rad, "v_pulse_half", (), _F64, buf)
+        self._ds_p_avg = self._create_extensible(rad, "p_avg", (), _F64, buf)
+
+        huy = self._file["huygens"]
+        nh = self._n_huy
+        self._ds_h_p = self._create_extensible(huy, "p_face", (nh,), _F32, buf)
+        self._ds_h_vn = self._create_extensible(huy, "vn", (nh,), _F32, buf)
+        self._ds_h_tp = self._create_extensible(huy, "times_p", (), _F64, buf)
+        self._ds_h_tvn = self._create_extensible(huy, "times_vn", (), _F64, buf)
+
+        box = self._file["box_surface"]
+        nb = self._n_box
+        self._ds_b_p = self._create_extensible(box, "p", (nb,), _F32, buf)
+        self._ds_b_t = self._create_extensible(box, "times", (), _F64, buf)
+
+        self._w_v_int = _ChunkWriter(self._ds_v_int, buf)
+        self._w_v_half = _ChunkWriter(self._ds_v_half, buf)
+        self._w_p_avg = _ChunkWriter(self._ds_p_avg, buf)
+        self._w_h_p = _ChunkWriter(self._ds_h_p, buf)
+        self._w_h_vn = _ChunkWriter(self._ds_h_vn, buf)
+        self._w_h_tp = _ChunkWriter(self._ds_h_tp, buf)
+        self._w_h_tvn = _ChunkWriter(self._ds_h_tvn, buf)
+        self._w_b_p = _ChunkWriter(self._ds_b_p, buf)
+        self._w_b_t = _ChunkWriter(self._ds_b_t, buf)
+
+    def _radiator_p_avg(self, p_flat: np.ndarray, n: int) -> float:
+        if self._rad_p_idx.size == 0:
+            return 0.0
+        t_n = float(n) * self.dt
+        dvdt = velocity_pulse_derivative(t_n, self.sigma, self.t0)
+        pc = p_flat[self._rad_p_idx].astype(_F64)
+        corr = 0.5 * self.h * self.rho * self._rad_w * dvdt
+        p_face = pc + corr
+        return float(np.sum(self._rad_w * p_face) / self._rad_w_sum)
+
+    def _huygens_p(self, p_flat: np.ndarray) -> np.ndarray:
+        samples = p_flat[self._huygens_idx4].astype(_F64)
+        return np.dot(samples, _STENCIL_W4)
+
+    def _huygens_vn(self, vx: np.ndarray, vy: np.ndarray, vz: np.ndarray) -> np.ndarray:
+        vx_f = vx.reshape(-1)
+        vy_f = vy.reshape(-1)
+        vz_f = vz.reshape(-1)
+        iv = self._huygens_iv
+        sgn = self._huygens_vsgn.astype(_F64)
+        axis = self._huygens_vaxis
+        v_pick = np.where(axis == 0, vx_f[iv], np.where(axis == 1, vy_f[iv], vz_f[iv]))
+        return (sgn * v_pick).astype(_F32)
+
+    def _box_surface_p(self, p_flat: np.ndarray, n: int) -> np.ndarray:
+        n_p = self._n_box
+        out = p_flat[self._box_idx_p].astype(_F32)
+        if self._rad_p_idx.size == 0:
+            return out
+        t_n = float(n) * self.dt
+        dvdt = velocity_pulse_derivative(t_n, self.sigma, self.t0)
+        corr_scale = np.float32(0.5 * self.h * self.rho * dvdt)
+        for q in range(n_p):
+            loc = int(self._box_rad_local[q])
+            if loc < 0:
+                continue
+            w = self._rad_w[loc]
+            out[q] = np.float32(
+                float(out[q]) + float(corr_scale * w)
+            )
+        return out
+
+    def sample(self, fields: Fields, n: int) -> None:
+        """Record fields at integer time index *n* (call after :func:`fdtd.kernels.step`)."""
+        if n != self._step:
+            raise ValueError(f"expected step {self._step}, got {n}")
+        t_n = float(n) * self.dt
+        v_int = velocity_pulse(t_n, self.sigma, self.t0)
+        v_half = velocity_at_half_step(n, self.dt, self.sigma, self.t0)
+        p_flat = fields.p.reshape(-1)
+
+        self._w_v_int.append(v_int)
+        self._w_v_half.append(float(v_half))
+        self._w_p_avg.append(self._radiator_p_avg(p_flat, n))
+
+        if n % self.decim == 0:
+            t_half = (float(n) + 0.5) * self.dt
+            self._w_h_p.append(self._huygens_p(p_flat).astype(_F32))
+            self._w_h_vn.append(
+                self._huygens_vn(fields.vx, fields.vy, fields.vz)
+            )
+            self._w_h_tp.append(t_n)
+            self._w_h_tvn.append(t_half)
+            self._w_b_p.append(self._box_surface_p(p_flat, n))
+            self._w_b_t.append(t_n)
+
+        self._step += 1
+
+    def close(self) -> None:
+        for w in (
+            self._w_v_int,
+            self._w_v_half,
+            self._w_p_avg,
+            self._w_h_p,
+            self._w_h_vn,
+            self._w_h_tp,
+            self._w_h_tvn,
+            self._w_b_p,
+            self._w_b_t,
+        ):
+            w.close()
+        n_full = self._step
+        n_dec = (n_full + self.decim - 1) // self.decim if n_full else 0
+        meta = self._file["meta"]
+        meta.attrs["n_steps"] = n_full
+        meta.attrs["n_samples_decimated"] = n_dec
+        times_full = np.arange(n_full, dtype=_F64) * self.dt if n_full else np.empty(0, _F64)
+        meta.create_dataset("sample_times_full", data=times_full, compression="gzip")
+        if n_dec:
+            times_dec = (np.arange(n_dec, dtype=_F64) * self.decim) * self.dt
+        else:
+            times_dec = np.empty(0, _F64)
+        meta.create_dataset("sample_times_decimated", data=times_dec, compression="gzip")
+        self._file.close()
+        self._file = None  # type: ignore[assignment]

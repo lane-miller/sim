@@ -40,7 +40,7 @@ A config-driven solver that computes, for **one physical system per run**:
 - **Time staggering:** p is sampled at integer steps and v at half steps. Correct the v spectra by e^{jωΔt/2}, with the sign set by the convention, before forming z or Kirchhoff–Helmholtz terms.
 - **Face pressure:**
   - Rigid faces: p_face = p_c, which is O(h²) because ∂p/∂n = 0.
-  - Radiator cells: p_face = p_c − (h/2)ρ∂v_n/∂t, with the sign set by the normal direction.
+  - Radiator cells: p_face = p_c + (h/2)ρ∂v_n/∂t for outward normal n.
   - Edge-adjacent cells are singular (p ~ r^(−1/3)); their convergence is checked separately.
   - Far field / KH uses a **Huygens surface** (C4-kh), not the box faces; box-face p is for surface probes.
 
