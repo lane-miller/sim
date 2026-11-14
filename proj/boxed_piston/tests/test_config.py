@@ -22,6 +22,9 @@ from fdtd.config import (  # noqa: E402
     derive,
     validate,
 )
+from fdtd.run import run  # noqa: E402
+
+CONFIGS = ROOT / "configs"
 
 SQRT3 = math.sqrt(3.0)
 
@@ -117,3 +120,18 @@ def test_free_field_derives_without_error():
     assert d.total_cells > 0
     errors, _ = validate(cfg, d)
     assert not errors
+
+
+def test_default_json_matches_config_defaults():
+    loaded = Config.from_json((CONFIGS / "default.json").read_text(encoding="utf-8"))
+    assert loaded.to_dict() == Config().to_dict()
+
+
+def test_smoke_json_derive_validate_and_dry_run():
+    cfg = Config.from_json((CONFIGS / "smoke.json").read_text(encoding="utf-8"))
+    derived = derive(cfg)
+    errors, _warnings = validate(cfg, derived)
+    assert not errors
+    summary = run(cfg, dry_run=True, progress=False)
+    assert isinstance(summary, dict)
+    assert summary["n_steps"] == derived.n_steps

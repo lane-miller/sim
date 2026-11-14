@@ -45,7 +45,7 @@ A config-driven solver that computes, for **one physical system per run**:
   - Far field / KH uses a **Huygens surface** (C4-kh), not the box faces; box-face p is for surface probes.
 
 ## 3. Software design
-- **Input:** a JSON config holding box dimensions, radiator shape, size and position, f_min, f_max, tolerances, optional overrides for derived parameters, the far-field angle grid, and the output path.
+- **Input:** a JSON config holding box dimensions, radiator shape, size and position, f_min, f_max, tolerances, optional overrides for derived parameters, the far-field angle grid, and the output path. Shipped examples: `configs/default.json` (dataclass defaults), `configs/smoke.json` (small end-to-end case).
 - **Pre-flight check:** before any computation, `run.py` prints a summary of the derived parameters and the estimates (cells, RAM, disk, run time), then lists warnings and errors. It waits for confirmation unless `--yes` is passed.
   - **Errors** (the run stops): a radiator tangent to an edge or within 2–3 cells of one; geometry that doesn't fit the box; the RAM estimate exceeds available memory.
   - **Warnings** (the run continues):

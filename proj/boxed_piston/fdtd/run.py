@@ -14,6 +14,12 @@ from typing import Any
 
 import numpy as np
 
+if __name__ == "__main__" and not __package__:
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+    
 from fdtd.config import (
     DEFAULT_RAM_LIMIT_BYTES,
     Config,
