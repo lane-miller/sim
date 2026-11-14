@@ -33,6 +33,7 @@ from fdtd.post.kirchhoff import (  # noqa: E402
     kh_pressure,
 )
 from fdtd.post.spectra import spectrum, spectrum_rows  # noqa: E402
+from fdtd.post.reference import z_baffled_circle  # noqa: E402
 from fdtd.post.zrad import causal_end_taper  # noqa: E402
 from fdtd.source import velocity_pulse  # noqa: E402
 from fdtd.post.zrad import zrad_from_h5  # noqa: E402
@@ -56,19 +57,6 @@ def _geometry(cfg: Config, d: object) -> tuple[float, float]:
     S = float(bound.s_grid)
     a = math.sqrt(S / math.pi)
     return S, a
-
-
-def _z_baffled_ref(ka: np.ndarray) -> np.ndarray:
-    from scipy.special import j1, struve
-
-    z = np.zeros_like(ka, dtype=np.complex128)
-    for i, x in enumerate(ka):
-        u = 2.0 * float(x)
-        if abs(x) < 1e-12:
-            z[i] = 0.0 + 0.0j
-            continue
-        z[i] = 1.0 - j1(u) / float(x) + 1.0j * struve(1, u) / float(x)
-    return z
 
 
 def _fit_low_ka(freqs: np.ndarray, z: np.ndarray, ka: np.ndarray) -> dict[str, float]:
@@ -213,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         k = 2.0 * np.pi * freqs / c
         ka = k * a
         ka_max = float(np.max(ka[freqs <= d.f_max]))
-        z_ref = _z_baffled_ref(ka)
+        z_ref = np.asarray(z_baffled_circle(ka), dtype=np.complex128)
         err = np.abs(z - z_ref)
         band = (freqs >= cfg.band.f_min) & (freqs <= d.f_max)
         fit = _fit_low_ka(freqs, z, ka)
@@ -324,6 +312,13 @@ def main(argv: list[str] | None = None) -> int:
             pat[m] = np.abs(2.0 * j1(u[m]) / u[m])
             rel_fd = np.abs(H_dir / H0)
             dir_db_err = 20.0 * np.log10(np.maximum(rel_fd, 1e-30) / np.maximum(pat, 1e-30))
+            pat_db = 20.0 * np.log10(np.maximum(pat, 1e-30))
+            dir_gate = pat_db >= -20.0
+            if np.any(dir_gate):
+                dir_max = float(np.max(np.abs(dir_db_err[dir_gate])))
+            else:
+                dir_max = float(np.max(np.abs(dir_db_err)))
+            dir_pass = dir_max <= _G3_DIR_DB
 
             g3[f"ka{ka_tgt:.0f}"] = {
                 "f_hz": float(f_hz),
@@ -331,7 +326,8 @@ def main(argv: list[str] | None = None) -> int:
                 "phase_err_deg": float(abs(ph_gate)),
                 "ff_vs_kh_db": float(db_ff),
                 "ff_vs_kh_phase_deg": float(abs(ph_ff)),
-                "dir_max_db_err": float(np.max(np.abs(dir_db_err))),
+                "dir_max_db_err": dir_max,
+                "dir_pass": bool(dir_pass),
             }
 
             if probe_centers is not None and probe_p_ts is not None and t_probe is not None:
@@ -368,7 +364,9 @@ def main(argv: list[str] | None = None) -> int:
                 g3_probe[f"ka{ka_tgt:.0f}"] = probes_kh
 
         g3_pass = all(
-            abs(v["db_err"]) <= _G3_DB and v["phase_err_deg"] <= _G3_PHASE_DEG
+            abs(v["db_err"]) <= _G3_DB
+            and v["phase_err_deg"] <= _G3_PHASE_DEG
+            and v.get("dir_pass", False)
             for v in g3.values()
         )
         gate = g1_pass and g2_pass
@@ -391,12 +389,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     for key in sorted(g3.keys()):
         v = g3[key]
-        ok = abs(v["db_err"]) <= _G3_DB and v["phase_err_deg"] <= _G3_PHASE_DEG
+        ok_xfer = abs(v["db_err"]) <= _G3_DB and v["phase_err_deg"] <= _G3_PHASE_DEG
+        ok_dir = bool(v.get("dir_pass", False))
+        ok = ok_xfer and ok_dir
         _gate_line(
             f"G3 {key}",
             ok,
             f"H_KH vs H_exact Δ={v['db_err']:+.2f} dB, ∠{v['phase_err_deg']:.1f}° "
             f"(tol ±{_G3_DB}, ±{_G3_PHASE_DEG}); "
+            f"directivity max |ΔdB|={v.get('dir_max_db_err', float('nan')):.3f} "
+            f"(ref≥−20 dB, tol {_G3_DIR_DB}); "
             f"report H_FF−H_KH {v.get('ff_vs_kh_db', float('nan')):+.2f} dB",
         )
     print("  G3-probe (report): transfer H = P/V vs V(radiator times_p spectrum)")
