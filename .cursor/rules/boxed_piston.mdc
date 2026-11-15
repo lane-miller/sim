@@ -16,4 +16,9 @@ alwaysApply: false
 - Tests: pytest, fast by default; mark anything over ~5 s with the slow marker.
 - Validation scripts follow c01–c03: progress printouts, require_ram,
   results JSON via to_json_safe.
+- Long-running scripts: wrap main() in validation._common.keep_awake and
+  print per-iteration progress with elapsed/ETA.
+- Validation FDTD HDF5: use validation._common.run_workdir (default
+  temporary); JSON/PNG under validation/results/. Pre-flight
+  require_h5_disk before runs.
 - End each reply with: files changed, assumed signatures, open issues.

@@ -241,8 +241,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=ROOT / "validation" / "results")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--ram-gb", type=float, default=DEFAULT_RAM_LIMIT_BYTES / 1e9)
+    parser.add_argument(
+        "--keep-h5",
+        action="store_true",
+        help="No FDTD HDF5 in this script; reserved for validation CLI consistency",
+    )
     args = parser.parse_args(argv)
+    with vc.keep_awake("c06_diag"):
+        return _c06_diag_body(args)
 
+
+def _c06_diag_body(args: argparse.Namespace) -> int:
+    vc.require_h5_disk(
+        0,
+        vc.workdir_disk_parent(keep=args.keep_h5),
+        label="c06_diag",
+    )
     base_cfg = Config.from_json(args.config.read_text(encoding="utf-8"))
     ram_limit = float(args.ram_gb) * 1e9
     timer = vc.RunTimer()

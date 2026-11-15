@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import math
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Generator, Iterable, TypeVar
 
 import numpy as np
 
@@ -28,6 +34,90 @@ PULSE_DELAY_SIGMA_FACTOR = 4.0
 SOURCE_BAND_DB = 30.0
 DEFAULT_TAIL_CELLS = 20.0
 ECHO_CLEARANCE_MARGIN = 1.15
+_H5_DISK_MAX_FRAC = 0.5
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+class H5DiskLimitExceeded(RuntimeError):
+    """Planned HDF5 output would exceed the disk budget."""
+
+    def __init__(
+        self,
+        label: str,
+        planned_bytes: float,
+        free_bytes: float,
+        parent: Path,
+    ) -> None:
+        self.label = label
+        self.planned_bytes = planned_bytes
+        self.free_bytes = free_bytes
+        self.parent = parent
+        super().__init__(
+            f"{label}: planned HDF5 {fmt_bytes(planned_bytes)} exceeds "
+            f"{_H5_DISK_MAX_FRAC:.0%} of free space on {parent} "
+            f"({fmt_bytes(free_bytes)} free)"
+        )
+
+
+def _h5_bytes_under(root: Path) -> int:
+    total = 0
+    for p in root.rglob("*.h5"):
+        if p.is_file():
+            total += p.stat().st_size
+    return total
+
+
+def workdir_disk_parent(*, keep: bool) -> Path:
+    """Directory whose free space is checked before a validation workdir is created."""
+    if keep:
+        return _PROJECT_ROOT / "outputs"
+    return Path(tempfile.gettempdir())
+
+
+def planned_h5_bytes(cfgs: Iterable[Config]) -> int:
+    from fdtd.config import derive
+    from fdtd.run import estimate_output_bytes
+
+    total = 0
+    for cfg in cfgs:
+        d = derive(cfg)
+        total += estimate_output_bytes(cfg, d)
+    return int(total)
+
+
+def require_h5_disk(planned_bytes: int, parent: Path, *, label: str) -> None:
+    parent.mkdir(parents=True, exist_ok=True)
+    free = float(shutil.disk_usage(parent).free)
+    print(
+        f"[disk] {label}: planned HDF5 ≈{fmt_bytes(planned_bytes)}  "
+        f"free on {parent} ≈{fmt_bytes(free)}",
+        flush=True,
+    )
+    if float(planned_bytes) > _H5_DISK_MAX_FRAC * free:
+        raise H5DiskLimitExceeded(label, float(planned_bytes), free, parent)
+
+
+@contextmanager
+def run_workdir(label: str, *, keep: bool = False) -> Generator[Path, None, None]:
+    """Scratch or kept directory for validation FDTD HDF5 (removed when *keep* is false)."""
+    tmp_mgr: tempfile.TemporaryDirectory[str] | None = None
+    if keep:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = _PROJECT_ROOT / "outputs" / f"{label}_{stamp}"
+        path.mkdir(parents=True, exist_ok=True)
+        kind = "kept"
+    else:
+        tmp_mgr = tempfile.TemporaryDirectory(prefix=f"bp_{label}_")
+        path = Path(tmp_mgr.name)
+        kind = "temporary"
+    print(f"[workdir] {path} ({kind})", flush=True)
+    try:
+        yield path
+    finally:
+        if tmp_mgr is not None:
+            h5_total = _h5_bytes_under(path)
+            tmp_mgr.cleanup()
+            print(f"[workdir] removed  HDF5 total {fmt_bytes(h5_total)}", flush=True)
 
 
 def memory_estimate_cube(n: int, cpml_cells: int) -> int:
@@ -60,6 +150,42 @@ def require_ram(
     if est > limit_bytes:
         raise RamLimitExceeded(label, n, float(est), float(limit_bytes))
     return est
+
+
+@contextmanager
+def keep_awake(label: str) -> Generator[None, None, None]:
+    """On macOS, run ``caffeinate -i -w <pid>`` for the wrapped block; no-op elsewhere."""
+    _ = label
+    proc: subprocess.Popen[bytes] | None = None
+    if sys.platform == "darwin" and shutil.which("caffeinate"):
+        proc = subprocess.Popen(
+            ["caffeinate", "-i", "-w", str(os.getpid())],
+        )
+        print(f"[keep_awake] caffeinate started (pid {proc.pid})", flush=True)
+    try:
+        yield
+    finally:
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            print(f"[keep_awake] caffeinate stopped (pid {proc.pid})", flush=True)
+
+
+@contextmanager
+def timed_section(label: str, *, min_report_s: float = 2.0) -> Generator[None, None, None]:
+    """Print start/done lines when the block takes longer than *min_report_s*."""
+    t0 = time.perf_counter()
+    print(f"[{label}] start", flush=True)
+    try:
+        yield
+    finally:
+        dt = time.perf_counter() - t0
+        if dt >= min_report_s:
+            print(f"[{label}] done  {dt:.1f} s", flush=True)
 
 
 class RunTimer:

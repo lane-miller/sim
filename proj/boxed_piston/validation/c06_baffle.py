@@ -7,7 +7,6 @@ import argparse
 import json
 import math
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,7 +36,7 @@ from fdtd.post.reference import z_baffled_circle  # noqa: E402
 from fdtd.post.zrad import causal_end_taper  # noqa: E402
 from fdtd.source import velocity_pulse  # noqa: E402
 from fdtd.post.zrad import zrad_from_h5  # noqa: E402
-from fdtd.run import run  # noqa: E402
+from fdtd.run import estimate_output_bytes, run  # noqa: E402
 from fdtd.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 
@@ -173,8 +172,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=ROOT / "validation" / "results")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--ram-gb", type=float, default=DEFAULT_RAM_LIMIT_BYTES / 1e9)
+    parser.add_argument(
+        "--keep-h5",
+        action="store_true",
+        help="Keep FDTD HDF5 under proj/boxed_piston/outputs/ (default: temporary)",
+    )
     args = parser.parse_args(argv)
+    with vc.keep_awake("c06_baffle"):
+        return _c06_body(args)
 
+
+def _c06_body(args: argparse.Namespace) -> int:
     cfg = Config.from_json(args.config.read_text(encoding="utf-8"))
     d = derive(cfg)
     ram_limit = float(args.ram_gb) * 1e9
@@ -188,8 +196,14 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     args.out.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        h5 = Path(tmp) / "c06_baffle.h5"
+    vc.require_h5_disk(
+        estimate_output_bytes(cfg, d),
+        vc.workdir_disk_parent(keep=args.keep_h5),
+        label="c06_baffle",
+    )
+
+    with vc.run_workdir("c06_baffle", keep=args.keep_h5) as wd:
+        h5 = wd / "c06_baffle.h5"
         timer.banner("c06", f"grid {d.nx}×{d.ny}×{d.nz}  steps≈{d.n_steps:,}")
         timer.begin("c06")
         run(cfg, out_path=h5, progress=True, ram_limit_bytes=ram_limit)
@@ -253,11 +267,12 @@ def main(argv: list[str] | None = None) -> int:
 
         for ka_tgt in (1.0, 3.0, 5.0):
             f_hz = ka_tgt * c / (math.pi * cfg.radiator.dims[0])
-            V = complex(spectrum(v_rad, t_rad, f_hz))
+            with vc.timed_section(f"huygens spectrum ka={ka_tgt:g} f={f_hz:.1f} Hz"):
+                V = complex(spectrum(v_rad, t_rad, f_hz))
+                p_face = np.asarray(spectrum_rows(p_win, t_p, f_hz), dtype=np.complex128)
+                vn_face = np.asarray(spectrum_rows(vn_win, t_v, f_hz), dtype=np.complex128)
             if abs(V) < 1e-30:
                 continue
-            p_face = np.asarray(spectrum_rows(p_win, t_p, f_hz), dtype=np.complex128)
-            vn_face = np.asarray(spectrum_rows(vn_win, t_v, f_hz), dtype=np.complex128)
             omega = 2.0 * math.pi * f_hz
             dpdn_row = dpdn_from_vn(
                 vn_face[np.newaxis, :],
@@ -295,15 +310,16 @@ def main(argv: list[str] | None = None) -> int:
             db_ff, ph_ff = _h_transfer_err(H_kh, H_ff)
 
             pts = r_far * dir_ax
-            p_dir = kh_pressure(
-                pts,
-                patches,
-                p_row,
-                dpdn_row,
-                k_sel,
-                image_plane_z=0.0,
-                near_subdivide=False,
-            )[0]
+            with vc.timed_section(f"KH directivity ka={ka_tgt:g} f={f_hz:.1f} Hz"):
+                p_dir = kh_pressure(
+                    pts,
+                    patches,
+                    p_row,
+                    dpdn_row,
+                    k_sel,
+                    image_plane_z=0.0,
+                    near_subdivide=False,
+                )[0]
             H_dir = p_dir / V
             H0 = H_dir[0]
             pat = np.ones_like(theta)

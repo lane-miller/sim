@@ -7,7 +7,6 @@ import argparse
 import json
 import math
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,7 +25,7 @@ from fdtd.config import (  # noqa: E402
 )
 from fdtd.grid import Grid  # noqa: E402
 from fdtd.post.zrad import zrad_from_h5  # noqa: E402
-from fdtd.run import run  # noqa: E402
+from fdtd.run import estimate_output_bytes, run  # noqa: E402
 from fdtd.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 
@@ -311,7 +310,17 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_RAM_LIMIT_BYTES / 1e9,
         help="RAM limit (GB)",
     )
+    parser.add_argument(
+        "--keep-h5",
+        action="store_true",
+        help="Keep FDTD HDF5 under proj/boxed_piston/outputs/ (default: temporary)",
+    )
     args = parser.parse_args(argv)
+    with vc.keep_awake("c05_lowfreq"):
+        return _c05_body(args)
+
+
+def _c05_body(args: argparse.Namespace) -> int:
     ram_limit = args.ram_gb * 1e9
     run_timer = vc.RunTimer()
     run_timer.banner("start", args.config.name)
@@ -347,8 +356,16 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-    with tempfile.TemporaryDirectory(prefix="c05_") as tmp:
-        tmp_p = Path(tmp)
+    planned_h5 = estimate_output_bytes(cfg_base, d_plan) + estimate_output_bytes(
+        cfg_gap2, d_plan2
+    )
+    vc.require_h5_disk(
+        planned_h5,
+        vc.workdir_disk_parent(keep=args.keep_h5),
+        label="c05_lowfreq",
+    )
+
+    with vc.run_workdir("c05_lowfreq", keep=args.keep_h5) as tmp_p:
         h5_base = tmp_p / "baseline.h5"
         h5_gap2 = tmp_p / "gap2.h5"
         _run_case(cfg_base, h5_base, ram_limit=ram_limit, run_timer=run_timer, label="run_base")

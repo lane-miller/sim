@@ -8,7 +8,6 @@ import copy
 import json
 import math
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -342,9 +341,10 @@ def _load_huygens_spectra(
     win = causal_end_taper(n_samp)
     p_win = p_ts * win[:, np.newaxis]
     vn_win = vn_ts * win[:, np.newaxis]
-    V = complex(spectrum(v_rad, t_rad, f_hz))
-    p_face = np.asarray(spectrum_rows(p_win, t_p, f_hz), dtype=np.complex128)
-    vn_face = np.asarray(spectrum_rows(vn_win, t_v, f_hz), dtype=np.complex128)
+    with vc.timed_section(f"huygens spectrum f={f_hz:.1f} Hz"):
+        V = complex(spectrum(v_rad, t_rad, f_hz))
+        p_face = np.asarray(spectrum_rows(p_win, t_p, f_hz), dtype=np.complex128)
+        vn_face = np.asarray(spectrum_rows(vn_win, t_v, f_hz), dtype=np.complex128)
     return patches, V, p_face, vn_face, rho
 
 
@@ -371,7 +371,8 @@ def _directivity_cut(
     k_sel = np.asarray([2.0 * math.pi * f_hz / c], dtype=np.float64)
     dpdn = dpdn_from_vn(vn_face[np.newaxis, :], omega, rho)
     p_row = p_face[np.newaxis, :]
-    p_obs = kh_pressure(pts, patches, p_row, dpdn, k_sel, image_plane_z=None, near_subdivide=True)[0]
+    with vc.timed_section(f"KH directivity {plane} f={f_hz:.1f} Hz"):
+        p_obs = kh_pressure(pts, patches, p_row, dpdn, k_sel, image_plane_z=None, near_subdivide=True)[0]
     H = p_obs / V
     axis_i = int(np.argmin(np.abs(theta)))
     H0 = H[axis_i]
@@ -436,8 +437,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=ROOT / "validation" / "results")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--ram-gb", type=float, default=DEFAULT_RAM_LIMIT_BYTES / 1e9)
+    parser.add_argument(
+        "--keep-h5",
+        action="store_true",
+        help="Keep FDTD HDF5 under proj/boxed_piston/outputs/ (default: temporary)",
+    )
     args = parser.parse_args(argv)
+    with vc.keep_awake("c08_convergence"):
+        return _c08_body(args)
 
+
+def _c08_body(args: argparse.Namespace) -> int:
     ram_limit = float(args.ram_gb) * 1e9
     timer = vc.RunTimer()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -463,6 +473,11 @@ def main(argv: list[str] | None = None) -> int:
         plan_cfgs.append(c)
 
     wall_est, peak_ram = _plan_resources(plan_cfgs, ram_limit)
+    vc.require_h5_disk(
+        vc.planned_h5_bytes(plan_cfgs),
+        vc.workdir_disk_parent(keep=args.keep_h5),
+        label="c08_convergence",
+    )
     print("\n=== C8-convergence plan ===", flush=True)
     print(f"  FDTD runs: {len(plan_cfgs)}", flush=True)
     print(f"  estimated wall time: {wall_est:.0f} s ({wall_est / 60:.1f} min)", flush=True)
@@ -476,8 +491,7 @@ def main(argv: list[str] | None = None) -> int:
     g3_pass = True
     overall = False
 
-    with tempfile.TemporaryDirectory(prefix="c08_") as tmpdir:
-        tmp = Path(tmpdir)
+    with vc.run_workdir("c08_convergence", keep=args.keep_h5) as tmp:
 
         # --- G1: baffle PPW sweep vs analytic ---
         print("\n=== G1 baffle dispersion ===", flush=True)
@@ -782,13 +796,14 @@ def main(argv: list[str] | None = None) -> int:
             for qi, name in enumerate(probe_names):
                 P_fd = complex(spectrum(probe_p_ts[:, qi] * win_pr, t_probe, f_hz))
                 H_fd = P_fd / V
-                p_kh = kh_pressure_loop(
-                    probe_centers[qi].reshape(1, 3),
-                    patches,
-                    p_row,
-                    dpdn,
-                    k_sel,
-                )[0, 0]
+                with vc.timed_section(f"KH probe {name} kL={kl:g} f={f_hz:.1f} Hz"):
+                    p_kh = kh_pressure_loop(
+                        probe_centers[qi].reshape(1, 3),
+                        patches,
+                        p_row,
+                        dpdn,
+                        k_sel,
+                    )[0, 0]
                 H_kh = p_kh / V
                 db, ph = _h_transfer_err(H_fd, H_kh)
                 ok = abs(db) <= _G3_DB and abs(ph) <= _G3_PHASE_DEG

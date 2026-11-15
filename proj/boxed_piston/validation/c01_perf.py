@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import validation._common as vc  # noqa: E402
+
 from fdtd.config import (  # noqa: E402
     Air,
     Band,
@@ -743,8 +745,22 @@ def main() -> int:
         default=ROOT / "validation" / "results" / "c01_perf",
         help="Output directory for JSON results",
     )
+    parser.add_argument(
+        "--keep-h5",
+        action="store_true",
+        help="No FDTD HDF5 in this script; reserved for validation CLI consistency",
+    )
     args = parser.parse_args()
+    with vc.keep_awake("c01_perf"):
+        return _c01_body(args)
 
+
+def _c01_body(args: argparse.Namespace) -> int:
+    vc.require_h5_disk(
+        0,
+        vc.workdir_disk_parent(keep=args.keep_h5),
+        label="c01_perf",
+    )
     sizes = list(_QUICK_SIZES if args.quick else _parse_int_list(args.sizes))
     thread_specs = _parse_thread_list(args.threads)
     ram_limit = float(DEFAULT_RAM_LIMIT_BYTES)

@@ -130,7 +130,7 @@ Measured in C1-perf at ~375 M cell-updates/s, ~3.4 box transits, without surface
 
 | Check | What | Reference | Gate |
 |---|---|---|---|
-| C9-bempp | 2–3 small boxes at kL ≈ 1–10, including an edge-offset radiator | bempp, using Burton–Miller (a cube's first irregular frequency is kL = π√3 ≈ 5.4) | Edge and offset accuracy; far-field phase |
+| C9-bempp | **Box** with edge-offset rectangular radiator (`configs/c09_box.json`: W×H×D = 0.20×0.15×0.25 m, 0.08×0.06 m rad, *h_override* = 5 mm, f = 50–3000 Hz). FDTD with Huygens + **box_surface** recording vs **bempp-cl** exterior Neumann Burton–Miller (`fdtd/post/bem_ref.py`: structured box mesh, P1/DP0, e^{−iωt}→e^{+jωt} conjugation). **G0** pulsating-sphere analytic *z* = jka/(1+jka) at ka ∈ {0.2, 1, π, 4} (π guards irregular frequencies). **G1** max \|z_FDTD−z_BEM\| ≤ 0.02 on 24 log-spaced band frequencies plus kL = 2, 5, 10 (*L* = max box side); BEM *h* = 10 mm. **G2** at those kL: *r* = 10L, **xz**, **yz**, and 45° vertical plane — on-axis \|H\| ≤ 0.3 dB, phase ≤ 5°; directivity max \|ΔdB\| ≤ 0.5 for level ≥ −20 dB re on-axis (FDTD KH full **G** vs BEM potentials). **G3** BEM mesh convergence: max \|z_10mm−z_7mm\| ≤ 0.005. Report surface *p* at five probe points; PNGs *z* and directivity; RAM before FDTD and BEM; est. BEM wall time after first frequency. Fail G0 → abort. | bempp-cl Burton–Miller | G0–G3 as stated; irregular freq. at kL ≈ π√3 on a cube |
 | C10-power | Power balance: Re Z vs far-field radiated power | Self-consistency | Global sanity |
 
 The pre-flight UI, README and example configs come after Stage D.

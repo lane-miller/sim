@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import validation._common as vc  # noqa: E402
+
 from fdtd.config import (  # noqa: E402
     Air,
     Band,
@@ -1570,8 +1572,22 @@ def main() -> int:
         action="store_true",
         help="Print per-frequency analysis bins and skipped receivers",
     )
+    parser.add_argument(
+        "--keep-h5",
+        action="store_true",
+        help="No FDTD HDF5 in this script; reserved for validation CLI consistency",
+    )
     args = parser.parse_args()
+    with vc.keep_awake("c02_dispersion"):
+        return _c02_body(args)
 
+
+def _c02_body(args: argparse.Namespace) -> int:
+    vc.require_h5_disk(
+        0,
+        vc.workdir_disk_parent(keep=args.keep_h5),
+        label="c02_dispersion",
+    )
     run_timer = _RunTimer()
     box_mm = tuple(float(x.strip()) for x in args.box_mm.split(",") if x.strip())
     if args.quick:

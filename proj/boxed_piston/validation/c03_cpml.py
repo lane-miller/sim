@@ -3077,8 +3077,22 @@ def main() -> int:
         action="store_true",
         help="After calibration, rerun monopole cal with s=1 point source",
     )
+    parser.add_argument(
+        "--keep-h5",
+        action="store_true",
+        help="No FDTD HDF5 in this script; reserved for validation CLI consistency",
+    )
     args = parser.parse_args()
+    with vc.keep_awake("c03_cpml"):
+        return _c03_body(args)
 
+
+def _c03_body(args: argparse.Namespace) -> int:
+    vc.require_h5_disk(
+        0,
+        vc.workdir_disk_parent(keep=args.keep_h5),
+        label="c03_cpml",
+    )
     run_timer = vc.RunTimer()
     s = args.source_size
     ram_limit = float(args.ram_limit_gib) * 1024**3

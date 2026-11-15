@@ -100,7 +100,7 @@ def _cells_across_radiator(cfg: Config, derived: Derived) -> float:
     return d / derived.h
 
 
-def _estimate_output_bytes(cfg: Config, derived: Derived) -> int:
+def estimate_output_bytes(cfg: Config, derived: Derived) -> int:
     """Rough uncompressed payload (datasets only; excludes HDF5 overhead)."""
     m = decimation_factor(derived.f_max, derived.dt)
     n_full = derived.n_steps
@@ -196,7 +196,7 @@ def _dry_run_summary(cfg: Config, derived: Derived) -> dict[str, Any]:
         "cells_across_radiator": _cells_across_radiator(cfg, derived),
         "memory_bytes": mem,
         "decimation_m": m,
-        "output_bytes_est": _estimate_output_bytes(cfg, derived),
+        "output_bytes_est": estimate_output_bytes(cfg, derived),
         "wall_time_s_est": _estimate_wall_time_s(derived),
         "zrad_source": "analytic_baffled" if derived.zrad_fallback else "fdtd",
         "geometry": cfg.geometry,
@@ -345,20 +345,27 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Validate and print summary only")
     parser.add_argument("--quiet", action="store_true", help="Disable progress lines")
     args = parser.parse_args(argv)
-    try:
-        result = run(
-            args.config,
-            out_path=args.output,
-            dry_run=args.dry_run,
-            progress=not args.quiet,
-        )
-    except (ValueError, RuntimeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    if isinstance(result, dict):
+    from validation._common import keep_awake
+
+    with keep_awake("fdtd.run"):
+        try:
+            result = run(
+                args.config,
+                out_path=args.output,
+                dry_run=args.dry_run,
+                progress=not args.quiet,
+            )
+        except (ValueError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if isinstance(result, dict):
+            return 0
+        out_p = Path(result)
+        if out_p.is_file():
+            print(f"wrote {result}  ({out_p.stat().st_size / 1e6:.2f} MB)")
+        else:
+            print(f"wrote {result}")
         return 0
-    print(f"wrote {result}")
-    return 0
 
 
 if __name__ == "__main__":

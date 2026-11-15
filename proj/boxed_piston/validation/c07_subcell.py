@@ -8,7 +8,6 @@ import copy
 import json
 import math
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -301,12 +300,53 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=ROOT / "validation" / "results")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--ram-gb", type=float, default=DEFAULT_RAM_LIMIT_BYTES / 1e9)
+    parser.add_argument(
+        "--keep-h5",
+        action="store_true",
+        help="Keep FDTD HDF5 under proj/boxed_piston/outputs/ (default: temporary)",
+    )
     args = parser.parse_args(argv)
+    with vc.keep_awake("c07_subcell"):
+        return _c07_body(args)
 
+
+def _c07_planned_cfgs(args: argparse.Namespace) -> list[Config]:
+    cfg_g1 = Config.from_json(args.g1_config.read_text(encoding="utf-8"))
+    cfgs: list[Config] = [cfg_g1]
+    h = derive(cfg_g1).h
+    for xc, yc in ((0.25 * h, 0.25 * h), (0.5 * h, 0.37 * h)):
+        cpy = copy.deepcopy(cfg_g1)
+        cpy.radiator.x_c, cpy.radiator.y_c = xc, yc
+        cfgs.append(cpy)
+    cfgs.append(Config.from_json(args.g2_config.read_text(encoding="utf-8")))
+    cfg_g3_base = Config.from_json(args.g3_config.read_text(encoding="utf-8"))
+    a_g3 = _a_equiv(cfg_g3_base)
+    cfg_g3_base.band.f_max = _f_max_ka(ka_max=_G3_KA_MAX, a_m=a_g3, c=cfg_g3_base.air.c)
+    for n_cells in _G3_CELLS:
+        cpy = copy.deepcopy(cfg_g3_base)
+        cpy.numerics.cells_across_radiator = n_cells
+        cfgs.append(cpy)
+    cfg_rt = Config.from_json(args.racetrack_config.read_text(encoding="utf-8"))
+    a_rt = _a_equiv(cfg_rt)
+    cfg_rt.band.f_max = _f_max_ka(ka_max=_G3_KA_MAX, a_m=a_rt, c=cfg_rt.air.c)
+    for n_cells in _RT_CELLS:
+        cpy = copy.deepcopy(cfg_rt)
+        cpy.numerics.cells_across_radiator = n_cells
+        cfgs.append(cpy)
+    return cfgs
+
+
+def _c07_body(args: argparse.Namespace) -> int:
     ram_limit = float(args.ram_gb) * 1e9
     timer = vc.RunTimer()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     args.out.mkdir(parents=True, exist_ok=True)
+
+    vc.require_h5_disk(
+        vc.planned_h5_bytes(_c07_planned_cfgs(args)),
+        vc.workdir_disk_parent(keep=args.keep_h5),
+        label="c07_subcell",
+    )
 
     gates: dict[str, Any] = {}
     reports: dict[str, Any] = {}
@@ -314,8 +354,7 @@ def main(argv: list[str] | None = None) -> int:
     rt_report: dict[str, Any] = {}
     gate_pass = True
 
-    with tempfile.TemporaryDirectory(prefix="c07_") as tmpdir:
-        tmp = Path(tmpdir)
+    with vc.run_workdir("c07_subcell", keep=args.keep_h5) as tmp:
 
         # --- G1: offset invariance (circle, baffle) ---
         cfg_g1 = Config.from_json(args.g1_config.read_text(encoding="utf-8"))
