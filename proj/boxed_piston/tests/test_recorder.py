@@ -37,7 +37,7 @@ from boxrad.recorder import (  # noqa: E402
     validate_huygens_patches_interior,
 )
 from boxrad.source import BoxBoundary, velocity_pulse  # noqa: E402
-from boxrad.run import run  # noqa: E402
+from boxrad.runner import run  # noqa: E402
 
 _F64 = np.float64
 
@@ -334,19 +334,19 @@ def test_buffer_sizes_bounded():
             offset_cells=3,
             buffer_samples=buf,
         )
-    assert rec.max_buffer_bytes <= buf * (
-        8  # v_int
-        + 8  # v_half
-        + 8  # p_avg
-        + 8  # rad times_p
-        + 8  # rad times_v_half
-        + 8  # h tp
-        + 8  # h tvn
-        + 8  # b t
-        + rec._n_huy * 4 * 2  # huygens p + vn float32
-        + rec._n_box * 4  # box p
-    ) + 4096
-    rec.close()
+        assert rec.max_buffer_bytes <= buf * (
+            8  # v_int
+            + 8  # v_half
+            + 8  # p_avg
+            + 8  # rad times_p
+            + 8  # rad times_v_half
+            + 8  # h tp
+            + 8  # h tvn
+            + 8  # b t
+            + rec._n_huy * 4 * 2  # huygens p + vn float32
+            + rec._n_box * 4  # box p
+        ) + 4096
+        rec.close()
 
 
 def test_decimation_factor_floor():
@@ -368,7 +368,7 @@ def test_recorded_times_match_leapfrog_after_step(monkeypatch):
         out.run_time_s = n_steps * out.dt
         return out
 
-    monkeypatch.setattr("boxrad.run.derive", wrapped)
+    monkeypatch.setattr("boxrad.runner.derive", wrapped)
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "times.h5"

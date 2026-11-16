@@ -373,6 +373,53 @@ def _radiator_half_extents_xy(rad: Radiator) -> tuple[float, float]:
     raise ValueError(f"unknown radiator shape: {rad.shape!r}")
 
 
+def radiator_outline_loops(
+    rad: Radiator,
+    *,
+    n_circle: int = 128,
+    n_arc: int = 32,
+) -> list[np.ndarray]:
+    """Closed (N, 2) polylines in the radiator-centered frame (matches ``point_inside_radiator``)."""
+    if rad.shape == "circle":
+        r = 0.5 * rad.dims[0]
+        th = np.linspace(0.0, 2.0 * math.pi, n_circle)
+        return [np.column_stack([r * np.cos(th), r * np.sin(th)])]
+    if rad.shape == "rect":
+        hw, hh = _radiator_half_extents_xy(rad)
+        return [
+            np.array(
+                [
+                    [-hw, -hh],
+                    [hw, -hh],
+                    [hw, hh],
+                    [-hw, hh],
+                    [-hw, -hh],
+                ],
+                dtype=_F64,
+            )
+        ]
+    if rad.shape == "racetrack":
+        w, h = rad.dims[0], rad.dims[1]
+        d = min(w, h)
+        r = 0.5 * d
+        pts: list[list[float]] = []
+        if w >= h:
+            cx_l, cx_r = -(0.5 * w - r), 0.5 * w - r
+            th = np.linspace(0.5 * math.pi, 1.5 * math.pi, n_arc)
+            pts.extend([cx_l + r * math.cos(t), r * math.sin(t)] for t in th)
+            th = np.linspace(-0.5 * math.pi, 0.5 * math.pi, n_arc)
+            pts.extend([cx_r + r * math.cos(t), r * math.sin(t)] for t in th)
+        else:
+            cy_l, cy_r = -(0.5 * h - r), 0.5 * h - r
+            th = np.linspace(math.pi, 0.0, n_arc)
+            pts.extend([r * math.cos(t), cy_l + r * math.sin(t)] for t in th)
+            th = np.linspace(0.0, math.pi, n_arc)
+            pts.extend([r * math.cos(t), cy_r + r * math.sin(t)] for t in th)
+        pts.append(pts[0])
+        return [np.asarray(pts, dtype=_F64)]
+    raise ValueError(f"unknown radiator shape: {rad.shape!r}")
+
+
 def point_inside_radiator(x: float, y: float, rad: Radiator) -> bool:
     """True if ``(x, y)`` lies inside the radiator outline (radiator-centered frame)."""
     if rad.shape == "circle":

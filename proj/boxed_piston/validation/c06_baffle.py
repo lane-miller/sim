@@ -36,7 +36,7 @@ from boxrad.post.reference import z_baffled_circle  # noqa: E402
 from boxrad.post.zrad import causal_end_taper  # noqa: E402
 from boxrad.source import velocity_pulse  # noqa: E402
 from boxrad.post.zrad import zrad_from_h5  # noqa: E402
-from boxrad.run import estimate_output_bytes, run  # noqa: E402
+from boxrad.runner import estimate_output_bytes, run  # noqa: E402
 from boxrad.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 

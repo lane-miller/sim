@@ -21,6 +21,12 @@ _RunKey = TypeVar("_RunKey")
 
 from boxrad.config import DEFAULT_RAM_LIMIT_BYTES, Config, SQRT3, estimate_memory_bytes
 from boxrad.grid import Grid
+from boxrad.post.transfer import (
+    h_transfer_err,
+    load_box_surface_spectrum,
+    load_huygens_spectra,
+    load_radiator_velocity_spectrum,
+)
 
 TUKEY_ALPHA = 0.25
 END_TAPER_FRAC = TUKEY_ALPHA
@@ -76,7 +82,7 @@ def workdir_disk_parent(*, keep: bool) -> Path:
 
 def planned_h5_bytes(cfgs: Iterable[Config]) -> int:
     from boxrad.config import derive
-    from boxrad.run import estimate_output_bytes
+    from boxrad.runner import estimate_output_bytes
 
     total = 0
     for cfg in cfgs:
@@ -801,17 +807,6 @@ def runs_on_common_ka(
     return ka_grid, aligned, meta
 
 
-def h_transfer_err(h_ref: complex, h: complex) -> tuple[float, float]:
-    """Compare transfer phasors H (dB and phase deg relative to *h_ref*)."""
-    db = 20.0 * math.log10(abs(h) / max(abs(h_ref), 1e-30))
-    ph = float(np.rad2deg(np.angle(h) - np.angle(h_ref)))
-    while ph > 180.0:
-        ph -= 360.0
-    while ph < -180.0:
-        ph += 360.0
-    return db, ph
-
-
 def richardson_extrap_complex(
     z_coarse: complex,
     z_fine: complex,
@@ -849,79 +844,6 @@ def box_mode_probe_targets(
         i, j, k = grid.index_of(x, y, z)
         snapped.append(grid.coords_of(i, j, k))
     return snapped
-
-
-def load_huygens_spectra(
-    path: Path,
-    derived: object,
-    f_hz: float,
-) -> tuple[Any, complex, np.ndarray, np.ndarray]:
-    """Huygens face spectra and radiator ``V(f)`` (C6/C8 transfer-function convention)."""
-    import h5py
-
-    from boxrad.post.kirchhoff import SurfacePatches
-    from boxrad.post.spectra import spectrum, spectrum_rows
-    from boxrad.post.zrad import causal_end_taper
-    from boxrad.source import velocity_pulse
-
-    with h5py.File(path, "r") as f:
-        centers = np.asarray(f["huygens/centers"][()], dtype=np.float64)
-        normals = np.asarray(f["huygens/normals"][()], dtype=np.float64)
-        areas = np.asarray(f["huygens/areas"][()], dtype=np.float64)
-        patches = SurfacePatches(centers, normals, areas, float(derived.h))  # type: ignore[attr-defined]
-        t_p = np.asarray(f["huygens/times_p"][()], dtype=np.float64)
-        t_v = np.asarray(f["huygens/times_vn"][()], dtype=np.float64)
-        p_ts = np.asarray(f["huygens/p_face"][()], dtype=np.float64)
-        vn_ts = np.asarray(f["huygens/vn"][()], dtype=np.float64)
-        t_rad = np.asarray(f["radiator/times_p"][()], dtype=np.float64)
-        v_rad = np.array(
-            [velocity_pulse(float(t), derived.pulse_sigma, derived.pulse_t0) for t in t_rad],  # type: ignore[attr-defined]
-            dtype=np.float64,
-        )
-    n_samp = p_ts.shape[0]
-    win = causal_end_taper(n_samp)
-    p_win = p_ts * win[:, np.newaxis]
-    vn_win = vn_ts * win[:, np.newaxis]
-    with timed_section(f"huygens spectrum f={f_hz:.1f} Hz"):
-        V = complex(spectrum(v_rad, t_rad, f_hz))
-        p_face = np.asarray(spectrum_rows(p_win, t_p, f_hz), dtype=np.complex128)
-        vn_face = np.asarray(spectrum_rows(vn_win, t_v, f_hz), dtype=np.complex128)
-    return patches, V, p_face, vn_face
-
-
-def load_radiator_velocity_spectrum(path: Path, derived: object, f_hz: float) -> complex:
-    """Radiator velocity spectrum ``V(f)`` at pressure sample times."""
-    import h5py
-
-    from boxrad.post.spectra import spectrum
-    from boxrad.source import velocity_pulse
-
-    with h5py.File(path, "r") as f:
-        t_rad = np.asarray(f["radiator/times_p"][()], dtype=np.float64)
-        v_rad = np.array(
-            [velocity_pulse(float(t), derived.pulse_sigma, derived.pulse_t0) for t in t_rad],  # type: ignore[attr-defined]
-            dtype=np.float64,
-        )
-    return complex(spectrum(v_rad, t_rad, f_hz))
-
-
-def load_box_surface_spectrum(path: Path, f_hz: float) -> tuple[np.ndarray, np.ndarray]:
-    """Box-face pressure row spectrum at stored sample times."""
-    import h5py
-
-    from boxrad.post.spectra import spectrum_rows
-    from boxrad.post.zrad import causal_end_taper
-
-    with h5py.File(path, "r") as f:
-        if "box_surface" not in f:
-            raise RuntimeError("HDF5 missing box_surface group")
-        centers = np.asarray(f["box_surface/centers"][()], dtype=np.float64)
-        t = np.asarray(f["box_surface/times"][()], dtype=np.float64)
-        p_ts = np.asarray(f["box_surface/p"][()], dtype=np.float64)
-    win = causal_end_taper(p_ts.shape[0])
-    p_win = p_ts * win[:, np.newaxis]
-    p_spec = np.asarray(spectrum_rows(p_win, t, f_hz), dtype=np.complex128)
-    return centers, p_spec.ravel()
 
 
 def print_runtime_summary(run_timer: RunTimer, phases: tuple[str, ...]) -> None:

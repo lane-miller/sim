@@ -18,7 +18,7 @@ from boxrad.config import (
     derive,
     validate,
 )
-from boxrad.run import run
+from boxrad.runner import run
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 

@@ -17,6 +17,7 @@ from boxrad.post.kirchhoff import (
     huygens_box_patches,
     huygens_open_patches,
 )
+from boxrad.post.finalize import compute_finalize_results, write_finalize_meta
 from boxrad.source import (
     BoxBoundary,
     velocity_at_half_step,
@@ -473,6 +474,8 @@ class Recorder:
         self._file = h5.File(path, "w")
         self._step = 0
         self._buf_samples = int(buffer_samples)
+        self._tail_db: float | None = None
+        self._closed = False
 
         self._write_static_meta(box_patches, huygens_patches)
         self._init_datasets()
@@ -718,6 +721,9 @@ class Recorder:
         self._step += 1
 
     def close(self) -> None:
+        if self._closed:
+            return
+        h5 = _require_h5py()
         for w in (
             self._w_v_int,
             self._w_v_half,
@@ -735,18 +741,44 @@ class Recorder:
             ),
         ):
             w.close()
-        n_full = self._step
-        n_dec = (n_full + self.decim - 1) // self.decim if n_full else 0
-        meta = self._file["meta"]
-        meta.attrs["n_steps"] = n_full
-        meta.attrs["n_samples_decimated"] = n_dec
-        if n_dec:
-            steps = np.arange(n_dec, dtype=_F64) * float(self.decim)
-            times_dec_p = (steps + 1.0) * self.dt
-            times_dec_v = (steps + 0.5) * self.dt
+        p_avg_full: np.ndarray
+        if self._file is not None:
+            n_full = self._step
+            n_dec = (n_full + self.decim - 1) // self.decim if n_full else 0
+            meta = self._file["meta"]
+            meta.attrs["n_steps"] = n_full
+            meta.attrs["n_samples_decimated"] = n_dec
+            if n_dec:
+                steps = np.arange(n_dec, dtype=_F64) * float(self.decim)
+                times_dec_p = (steps + 1.0) * self.dt
+                times_dec_v = (steps + 0.5) * self.dt
+            else:
+                times_dec_p = times_dec_v = np.empty(0, _F64)
+            meta.create_dataset("sample_times_decimated_p", data=times_dec_p, compression="gzip")
+            meta.create_dataset("sample_times_decimated_v", data=times_dec_v, compression="gzip")
+            p_avg_full = np.asarray(self._ds_p_avg[()], dtype=_F64)
+            self._file.flush()
+            self._file.close()
+            self._file = None  # type: ignore[assignment]
         else:
-            times_dec_p = times_dec_v = np.empty(0, _F64)
-        meta.create_dataset("sample_times_decimated_p", data=times_dec_p, compression="gzip")
-        meta.create_dataset("sample_times_decimated_v", data=times_dec_v, compression="gzip")
-        self._file.close()
-        self._file = None  # type: ignore[assignment]
+            with h5.File(self._path, "r") as f_read:
+                p_avg_full = np.asarray(f_read["radiator/p_avg"][()], dtype=_F64)
+
+        with h5.File(self._path, "r") as f_read:
+            tail_db, f_log, z_log = compute_finalize_results(
+                f_read,
+                self.cfg,
+                self.derived,
+                p_avg=p_avg_full,
+            )
+        with h5.File(self._path, "a") as f_append:
+            write_finalize_meta(
+                f_append,
+                self.cfg,
+                self.derived,
+                tail_db=tail_db,
+                f_log=f_log,
+                z_log=z_log,
+            )
+        self._tail_db = float(tail_db)
+        self._closed = True

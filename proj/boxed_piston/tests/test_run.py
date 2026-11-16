@@ -1,4 +1,4 @@
-"""Unit tests for boxrad.run (driver and dry run)."""
+"""Unit tests for boxrad.runner (driver and dry run)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from boxrad.config import (
 )
 from boxrad.kernels import step as kernel_step  # noqa: E402
 from boxrad.recorder import decimation_factor  # noqa: E402
-from boxrad.run import run  # noqa: E402
+from boxrad.runner import run  # noqa: E402
 from boxrad.source import velocity_pulse  # noqa: E402
 
 
@@ -54,7 +54,7 @@ def patch_few_steps(monkeypatch):
         d.run_time_s = n_steps * d.dt
         return d
 
-    monkeypatch.setattr("boxrad.run.derive", wrapped)
+    monkeypatch.setattr("boxrad.runner.derive", wrapped)
     return n_steps
 
 
@@ -82,6 +82,10 @@ def test_run_hdf5_structure(patch_few_steps):
             assert f["meta"].attrs["decimation_factor"] == m
             assert "wall_time_s" in f["meta"].attrs
             assert "git_commit" in f["meta"].attrs
+            assert "tail_db" in f["meta"].attrs
+            assert "boxrad_version" in f["meta"].attrs
+            assert "results/zrad" in f
+            assert "meta/accuracy" in f
 
 
 def test_dry_run_no_file(monkeypatch):
@@ -90,7 +94,7 @@ def test_dry_run_no_file(monkeypatch):
     def _no_alloc(*args, **kwargs):
         raise AssertionError("allocate_fields called during dry_run")
 
-    monkeypatch.setattr("boxrad.run.allocate_fields", _no_alloc)
+    monkeypatch.setattr("boxrad.runner.allocate_fields", _no_alloc)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "would.h5"
         summary = run(cfg, out_path=path, dry_run=True, progress=False)
@@ -119,8 +123,8 @@ def test_stability_guard_aborts(monkeypatch):
         d.run_time_s = 8 * d.dt
         return d
 
-    monkeypatch.setattr("boxrad.run.derive", wrapped)
-    monkeypatch.setattr("boxrad.run.STABILITY_CHECK_INTERVAL", 1)
+    monkeypatch.setattr("boxrad.runner.derive", wrapped)
+    monkeypatch.setattr("boxrad.runner.STABILITY_CHECK_INTERVAL", 1)
 
     orig = kernel_step
 
@@ -128,7 +132,7 @@ def test_stability_guard_aborts(monkeypatch):
         orig(fields, coeffs, slabs, cpml, boundary, n)
         fields.p[0, 0, 0] = np.float32(np.nan)
 
-    monkeypatch.setattr("boxrad.run.step", nan_step)
+    monkeypatch.setattr("boxrad.runner.step", nan_step)
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "abort.h5"

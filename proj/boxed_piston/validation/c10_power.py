@@ -29,7 +29,7 @@ from boxrad.config import (  # noqa: E402
 from boxrad.grid import Grid  # noqa: E402
 from boxrad.post.kirchhoff import dpdn_from_vn, kh_pressure  # noqa: E402
 from boxrad.post.zrad import zrad_from_h5  # noqa: E402
-from boxrad.run import estimate_output_bytes, run  # noqa: E402
+from boxrad.runner import estimate_output_bytes, run  # noqa: E402
 from boxrad.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 

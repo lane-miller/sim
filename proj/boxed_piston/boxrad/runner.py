@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -264,6 +266,7 @@ def run(
     *,
     dry_run: bool = False,
     progress: bool = True,
+    plot: bool = False,
     ram_limit_bytes: float = DEFAULT_RAM_LIMIT_BYTES,
     stability_interval: int = STABILITY_CHECK_INTERVAL,
     stability_p_max: float = STABILITY_ABS_P_MAX,
@@ -299,6 +302,7 @@ def run(
 
     rec: Recorder | None = None
     aborted_step: int | None = None
+    tail_db: float | None = None
     t_wall_start = time.perf_counter()
     last_pct = -2
     try:
@@ -333,6 +337,17 @@ def run(
                 meta.attrs["numba_num_threads"] = _numba_thread_count()
                 meta.attrs["git_commit"] = _git_commit_hash()
             rec.close()
+            tail_db = rec._tail_db
+    if tail_db is not None and tail_db > -60.0:
+        print(
+            f"warning: p_avg tail {tail_db:.1f} dB re peak (> −60 dB); "
+            "increase numerics.n_transits",
+            file=sys.stderr,
+        )
+    if plot:
+        from boxrad.viz import plot_geometry
+
+        plot_geometry(dest, show=True)
     return dest
 
 
@@ -341,20 +356,53 @@ def keep_awake(label: str) -> Generator[None, None, None]:
     """On macOS, run ``caffeinate -i -w <pid>`` for the wrapped block; no-op elsewhere."""
     _ = label
     proc: subprocess.Popen[bytes] | None = None
+    pid_printed: int | None = None
+
+    def _stop() -> None:
+        nonlocal proc, pid_printed
+        if proc is None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        if pid_printed is not None:
+            print(
+                f"[keep_awake] caffeinate stopped (pid {pid_printed})",
+                flush=True,
+            )
+        proc = None
+        pid_printed = None
+
+    def _signal_handler(signum: int, _frame: object) -> None:
+        _stop()
+        raise SystemExit(128 + signum)
+
     if sys.platform == "darwin" and shutil.which("caffeinate"):
         proc = subprocess.Popen(
             ["caffeinate", "-i", "-w", str(os.getpid())],
         )
+        pid_printed = proc.pid
         print(f"[keep_awake] caffeinate started (pid {proc.pid})", flush=True)
+        atexit.register(_stop)
+        prev_int = signal.signal(signal.SIGINT, _signal_handler)
+        prev_term = signal.signal(signal.SIGTERM, _signal_handler)
+    else:
+        prev_int = prev_term = None
     try:
         yield
     finally:
-        if proc is not None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        if prev_int is not None:
+            signal.signal(signal.SIGINT, prev_int)
+        if prev_term is not None:
+            signal.signal(signal.SIGTERM, prev_term)
+        try:
+            atexit.unregister(_stop)
+        except Exception:
+            pass
+        _stop()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -363,27 +411,57 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-o", "--output", type=Path, default=None, help="HDF5 output path")
     parser.add_argument("--dry-run", action="store_true", help="Validate and print summary only")
     parser.add_argument("--quiet", action="store_true", help="Disable progress lines")
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="After a full run, open the geometry window (config + result HDF5)",
+    )
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Dry run only: print summary without opening the geometry window",
+    )
     args = parser.parse_args(argv)
 
-    with keep_awake("boxrad.run"):
-        try:
+    result: Path | dict[str, Any] | None = None
+    try:
+        if args.dry_run:
             result = run(
                 args.config,
                 out_path=args.output,
-                dry_run=args.dry_run,
+                dry_run=True,
                 progress=not args.quiet,
+                plot=False,
             )
-        except (ValueError, RuntimeError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        if isinstance(result, dict):
-            return 0
+        else:
+            with keep_awake("boxrad.runner"):
+                result = run(
+                    args.config,
+                    out_path=args.output,
+                    dry_run=False,
+                    progress=not args.quiet,
+                    plot=False,
+                )
+    except (ValueError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if isinstance(result, dict):
+        pass
+    elif result is not None:
         out_p = Path(result)
         if out_p.is_file():
             print(f"wrote {result}  ({out_p.stat().st_size / 1e6:.2f} MB)")
         else:
             print(f"wrote {result}")
-        return 0
+
+    from boxrad.viz import plot_geometry
+
+    if args.dry_run:
+        if not args.no_show:
+            plot_geometry(args.config, show=True)
+    elif args.plot and result is not None and not isinstance(result, dict):
+        plot_geometry(result, show=True)
+    return 0
 
 
 if __name__ == "__main__":

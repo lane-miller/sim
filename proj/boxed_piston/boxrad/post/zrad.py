@@ -52,9 +52,16 @@ def causal_end_taper(
     return w
 
 
-def _load_meta(path: Path) -> dict[str, Any]:
+def _load_meta(source: str | Path | Any) -> dict[str, Any]:
+    """Load radiator traces and config from a path or an open HDF5 file (read mode)."""
     h5 = _require_h5py()
-    with h5.File(path, "r") as f:
+    owned = False
+    if isinstance(source, h5.File):
+        f = source
+    else:
+        f = h5.File(Path(source), "r")
+        owned = True
+    try:
         meta = f["meta"]
         dt = float(meta.attrs["dt"])
         cfg = Config.from_json(bytes(f["meta/config_json"][()]).decode("utf-8"))
@@ -65,6 +72,9 @@ def _load_meta(path: Path) -> dict[str, Any]:
             times = np.asarray(rad["times_p"][()], dtype=_F64)
         else:
             raise ValueError("radiator/times_p missing; cannot infer pressure sample times")
+    finally:
+        if owned:
+            f.close()
     if times.shape[0] != p_avg.shape[0]:
         raise ValueError(
             f"p_avg length {p_avg.shape[0]} != radiator/times_p length {times.shape[0]}"
@@ -82,6 +92,105 @@ def _n_fft_for_df(n_samples: int, dt: float, df_hz: float) -> int:
     span = max(n_samples * dt, dt)
     n_min = int(math.ceil(1.0 / (df_hz * dt)))
     return int(max(n_samples, n_min, 64))
+
+
+def log_frequency_grid(
+    f_min: float,
+    f_max: float,
+    *,
+    points_per_decade: int = 100,
+) -> np.ndarray:
+    """Log-spaced frequencies with *points_per_decade* samples per decade in ``[f_min, f_max]``."""
+    f_min = float(f_min)
+    f_max = float(f_max)
+    if f_min <= 0.0 or f_max <= f_min:
+        raise ValueError(f"invalid band {f_min}..{f_max} Hz")
+    decades = math.log10(f_max / f_min)
+    n = max(2, int(math.ceil(decades * float(points_per_decade))) + 1)
+    return np.logspace(math.log10(f_min), math.log10(f_max), num=n, dtype=_F64)
+
+
+def _spectrum_many(
+    x: np.ndarray,
+    times: np.ndarray,
+    f_arr: np.ndarray,
+    *,
+    chunk: int = 64,
+) -> np.ndarray:
+    """Exact :func:`~boxrad.post.spectra.spectrum` at many (possibly off-grid) frequencies."""
+    f_arr = np.asarray(f_arr, dtype=_F64).ravel()
+    out = np.empty(f_arr.size, dtype=_C128)
+    for i0 in range(0, f_arr.size, chunk):
+        i1 = min(i0 + chunk, f_arr.size)
+        part = np.asarray(
+            spectrum(x, times, f_arr[i0:i1], taper=None),
+            dtype=_C128,
+        )
+        out[i0:i1] = part
+    return out
+
+
+def _z_from_traces(
+    *,
+    rho: float,
+    c: float,
+    p_avg: np.ndarray,
+    times: np.ndarray,
+    sigma: float,
+    t0: float,
+    f_hz: np.ndarray,
+    use_taper: bool = True,
+    time_shift_s: float = 0.0,
+    source_band_db: float = _SOURCE_BAND_DB,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Dimensionless ``z(f)`` with exact per-frequency spectra (no interpolation)."""
+    f_hz = np.asarray(f_hz, dtype=_F64).ravel()
+    n = int(p_avg.shape[0])
+    if n == 0:
+        return f_hz, np.empty(0, dtype=_C128)
+    win = causal_end_taper(n) if use_taper else np.ones(n, dtype=_F64)
+    v_time = np.array([velocity_pulse(float(t), sigma, t0) for t in times], dtype=_F64)
+    p_win = p_avg * win
+    v_win = v_time * win
+    p_spec = _spectrum_many(p_win, times, f_hz)
+    v_spec = _spectrum_many(v_win, times, f_hz)
+    if time_shift_s != 0.0:
+        omega = 2.0 * math.pi * f_hz
+        p_spec = p_spec * np.exp(1j * omega * float(time_shift_s))
+    denom = rho * c * v_spec
+    z_spec = np.full(f_hz.shape[0], np.nan + 0j, dtype=_C128)
+    mag_v = np.abs(v_spec)
+    pk = float(np.max(mag_v)) if mag_v.size else 0.0
+    floor = pk * 10.0 ** (-source_band_db / 20.0)
+    band = (f_hz > 0.0) & (mag_v >= floor)
+    z_spec[band] = p_spec[band] / denom[band]
+    return f_hz, z_spec
+
+
+def zrad_at_frequencies(
+    path: str | Path | Any,
+    f_hz: np.ndarray,
+    *,
+    use_taper: bool = True,
+    time_shift_s: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(f, z)`` at explicit frequencies via discrete spectra (no interpolation)."""
+    blob = _load_meta(path)
+    rho = float(blob["cfg"].air.rho)
+    c = float(blob["cfg"].air.c)
+    sigma = float(blob["derived"]["pulse_sigma"])
+    t0 = float(blob["derived"]["pulse_t0"])
+    return _z_from_traces(
+        rho=rho,
+        c=c,
+        p_avg=blob["p_avg"],
+        times=blob["times"],
+        sigma=sigma,
+        t0=t0,
+        f_hz=f_hz,
+        use_taper=use_taper,
+        time_shift_s=time_shift_s,
+    )
 
 
 def _pad_for_fft(times: np.ndarray, x: np.ndarray, n_fft: int) -> tuple[np.ndarray, np.ndarray]:
@@ -151,9 +260,15 @@ def zrad_from_h5(
     if f is None:
         return f_pos, z_spec
     f_arr = np.asarray(f, dtype=_F64)
-    z_out = np.full(f_arr.shape, np.nan + 0j, dtype=np.complex128)
-    for i, fz in enumerate(f_arr.flat):
-        j = int(np.argmin(np.abs(f_pos - float(fz))))
-        if f_pos[j] > 0.0 and mag_v[j] >= floor:
-            z_out.flat[i] = z_spec[j]
-    return f_arr, z_out.reshape(np.asarray(f, dtype=_F64).shape)
+    _, z_out = _z_from_traces(
+        rho=rho,
+        c=c,
+        p_avg=p_avg,
+        times=times,
+        sigma=sigma,
+        t0=t0,
+        f_hz=f_arr,
+        use_taper=use_taper,
+        time_shift_s=time_shift_s,
+    )
+    return f_arr.reshape(np.asarray(f, dtype=_F64).shape), z_out.reshape(np.asarray(f, dtype=_F64).shape)

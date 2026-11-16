@@ -48,7 +48,7 @@ from boxrad.post.kirchhoff import (  # noqa: E402
 )
 from boxrad.post.spectra import spectrum  # noqa: E402
 from boxrad.post.zrad import causal_end_taper, zrad_from_h5  # noqa: E402
-from boxrad.run import estimate_output_bytes, run  # noqa: E402
+from boxrad.runner import estimate_output_bytes, run  # noqa: E402
 import validation._common as vc  # noqa: E402
 
 _G0_KA = (0.2, 1.0, math.pi, 4.0)

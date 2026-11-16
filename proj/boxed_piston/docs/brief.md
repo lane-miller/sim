@@ -46,7 +46,7 @@ A config-driven solver that computes, for **one physical system per run**:
 
 ## 3. Software design
 - **Input:** a JSON config with **`geometry`**: `box` (default) or `baffle`. Box mode requires box dimensions; baffle mode uses a half-space rigid plane at z-min (no box, no z-min CPML) with lateral domain sized to the radiator bounding box. Also: radiator shape, size and position, f_min, f_max, tolerances, optional overrides, far-field angle grid, output path. Examples: `configs/default.json`, `configs/smoke.json`, `configs/c06_baffle.json`.
-- **Pre-flight check:** before any computation, `run.py` prints a summary of the derived parameters and the estimates (cells, RAM, disk, run time), then lists warnings and errors. It waits for confirmation unless `--yes` is passed.
+- **Pre-flight check:** before any computation, `runner.py` prints a summary of the derived parameters and the estimates (cells, RAM, disk, run time), then lists warnings and errors. It waits for confirmation unless `--yes` is passed.
   - **Errors** (the run stops): a radiator tangent to an edge or within 2–3 cells of one; geometry that doesn't fit the box; the RAM estimate exceeds available memory.
   - **Warnings** (the run continues):
     - ka > 10 at f_max (beyond the rigid-piston regime);
@@ -72,7 +72,7 @@ A config-driven solver that computes, for **one physical system per run**:
 
   The default far-field output is p at 1 m per 1 m/s radiator velocity, on a full sphere at 5° spacing.
 - **Storage:** run outputs go to a configurable path, such as the external SSD, and are excluded from git.
-- **Package `boxrad/`** (install via `pyproject.toml`; `pip install -e .` in `proj/boxed_piston`). Console entry: `boxrad-run CONFIG [-o OUT] [--dry-run] [--quiet]`.
+- **Package `boxrad/`** (install via `pyproject.toml`; `pip install -e .` in `proj/boxed_piston`). Console: `boxrad-run CONFIG [-o OUT] [--dry-run] [--no-show] [--plot] [--quiet]`; geometry: `boxrad-plot CONFIG_OR_H5 [-o PNG] [--no-show] [--huygens]`.
 - **Module layout** (one Cursor prompt per module under `boxrad/`, each with a small unit test):
 
   | Module | Contents |
@@ -83,7 +83,7 @@ A config-driven solver that computes, for **one physical system per run**:
   | `cpml.py` | CPML profiles and slab updates |
   | `source.py` | Pulse design and radiator injection |
   | `recorder.py` | Chunked HDF5 output |
-  | `run.py` | Entry point: config → run → HDF5 (`python -m boxrad.run` or `boxrad-run`) |
+  | `runner.py` | Entry point: config → run → HDF5 (`python -m boxrad.runner` or `boxrad-run`) |
   | `post/` | z(f), Kirchhoff–Helmholtz, probes |
   | `validation/` | Check scripts (`c01_perf.py` … `c10_power.py`; not part of the wheel) |
 
@@ -118,7 +118,7 @@ Measured in C1-perf at ~375 M cell-updates/s, ~3.4 box transits, without surface
 
 **Stage B results:** C4-kh **PASS** (2026-11-14): exact-surface extinction ≤0.1% at 1.5–10× box size; ~2nd-order convergence in h; half-cell offset on **box** faces (p at h/2 outside) gives 3× probe rel err ≈2% / 4% / 14% at 1 / 4 / 10 kHz; **Huygens** (2 cells out, face **v_n** exact): 2-point face **p** (order 2) ≈0.3% / 0.7% / **1.5%** at 1 / 4 / 10 kHz (3× probe, ∝(kh)²); 4-point cubic face **p** (order 4) ≈0.1% / 0.2% / **≤0.2%** at 1 / 4 / 10 kHz on 3× & 10× probes and far field.
 
-**Stage C: box and radiator** (`grid.py` box mask and area weights, `source.py`, `recorder.py`, `run.py`).
+**Stage C: box and radiator** (`grid.py` box mask and area weights, `source.py`, `recorder.py`, `runner.py`).
 
 | Check | What | Reference | Gate |
 |---|---|---|---|

@@ -20,7 +20,9 @@ dependencies = [
 bem = ["bempp-cl"]
 
 [project.scripts]
-boxrad-run = "boxrad.run:main"
+boxrad-run = "boxrad.runner:main"
+boxrad-info = "boxrad.info:main"
+boxrad-plot = "boxrad.viz:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -28,7 +28,7 @@ from boxrad.config import (  # noqa: E402
 from boxrad.grid import Grid, radiator_area_exact  # noqa: E402
 from boxrad.post.reference import z_baffled_circle, z_baffled_rect  # noqa: E402
 from boxrad.post.zrad import zrad_from_h5  # noqa: E402
-from boxrad.run import run  # noqa: E402
+from boxrad.runner import run  # noqa: E402
 from boxrad.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 

@@ -22,4 +22,4 @@ Config-driven 3-D acoustic FDTD for radiation from a radiator on a rigid box (or
 - `tests/` — pytest unit tests (require installed `boxrad`)
 - `validation/` — C1–C10 check scripts (not in the wheel; optional extra `bem` for bempp-cl)
 
-Run a simulation: `boxrad-run configs/default.json` (or `python -m boxrad.run`).
+Run a simulation: `boxrad-run configs/default.json` (or `python -m boxrad.runner`). Preview geometry: `boxrad-plot configs/default.json` (interactive window; `-o out.png` to also save).

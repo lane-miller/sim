@@ -35,7 +35,7 @@ from boxrad.post.kirchhoff import (  # noqa: E402
 from boxrad.post.reference import z_baffled_circle  # noqa: E402
 from boxrad.post.spectra import spectrum  # noqa: E402
 from boxrad.post.zrad import causal_end_taper, zrad_from_h5  # noqa: E402
-from boxrad.run import run  # noqa: E402
+from boxrad.runner import run  # noqa: E402
 from boxrad.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 
