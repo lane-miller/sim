@@ -9,9 +9,9 @@ from typing import Any
 
 import numpy as np
 
-from fdtd.config import Config
-from fdtd.post.spectra import spectrum
-from fdtd.source import velocity_pulse
+from boxrad.config import Config
+from boxrad.post.spectra import spectrum
+from boxrad.source import velocity_pulse
 
 try:
     import h5py
@@ -27,7 +27,7 @@ _END_TAPER_FRAC = 0.25
 
 def _require_h5py() -> Any:
     if h5py is None:
-        raise ImportError("h5py is required for fdtd.post.zrad")
+        raise ImportError("h5py is required for boxrad.post.zrad")
     return h5py
 
 
@@ -107,7 +107,7 @@ def zrad_from_h5(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(f, z)`` with ``z = ⟨p⟩ / (ρ c V)`` (brief §1).
 
-    Spectra use :func:`~fdtd.post.spectra.spectrum` (Δt-weighted sum at stored
+    Spectra use :func:`~boxrad.post.spectra.spectrum` (Δt-weighted sum at stored
     ``radiator/times_p``). ``V(f)`` is the spectrum of ``velocity_pulse`` at those
     same times (not the analytic continuous ``pulse_spectrum``).
     """

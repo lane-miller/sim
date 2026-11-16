@@ -1,6 +1,6 @@
 """Post-processing: Kirchhoff–Helmholtz and related reductions.
 
-Import submodules directly (``fdtd.post.kirchhoff``, ``fdtd.post.zrad``) to
+Import submodules directly (``boxrad.post.kirchhoff``, ``boxrad.post.zrad``) to
 avoid pulling optional dependencies at package import time.
 """
 

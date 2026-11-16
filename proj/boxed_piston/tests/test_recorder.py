@@ -1,4 +1,4 @@
-"""Unit tests for fdtd.recorder (chunked HDF5 output)."""
+"""Unit tests for boxrad.recorder (chunked HDF5 output)."""
 
 from __future__ import annotations
 
@@ -11,12 +11,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
 h5py = pytest.importorskip("h5py")
 
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Air,
     Band,
     Box,
@@ -28,9 +25,9 @@ from fdtd.config import (  # noqa: E402
     SQRT3,
     derive,
 )
-from fdtd.grid import Grid, allocate_fields  # noqa: E402
-from fdtd.post.kirchhoff import face_p_from_cells, huygens_open_patches  # noqa: E402
-from fdtd.recorder import (  # noqa: E402
+from boxrad.grid import Grid, allocate_fields  # noqa: E402
+from boxrad.post.kirchhoff import face_p_from_cells, huygens_open_patches  # noqa: E402
+from boxrad.recorder import (  # noqa: E402
     Recorder,
     _geometry_origin,
     _huygens_depth,
@@ -39,8 +36,8 @@ from fdtd.recorder import (  # noqa: E402
     validate_huygens_clearance,
     validate_huygens_patches_interior,
 )
-from fdtd.source import BoxBoundary, velocity_pulse  # noqa: E402
-from fdtd.run import run  # noqa: E402
+from boxrad.source import BoxBoundary, velocity_pulse  # noqa: E402
+from boxrad.run import run  # noqa: E402
 
 _F64 = np.float64
 
@@ -371,7 +368,7 @@ def test_recorded_times_match_leapfrog_after_step(monkeypatch):
         out.run_time_s = n_steps * out.dt
         return out
 
-    monkeypatch.setattr("fdtd.run.derive", wrapped)
+    monkeypatch.setattr("boxrad.run.derive", wrapped)
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "times.h5"

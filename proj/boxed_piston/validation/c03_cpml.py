@@ -20,10 +20,10 @@ import numpy as np
 from numba import njit
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# ``validation`` package import (install boxrad separately).
+sys.path.insert(0, str(ROOT))
 
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Air,
     Band,
     Config,
@@ -33,9 +33,9 @@ from fdtd.config import (  # noqa: E402
     Radiator,
     derive,
 )
-from fdtd.cpml import make_cpml_state  # noqa: E402
-from fdtd.grid import Grid, allocate_fields, build_cpml_slabs  # noqa: E402
-from fdtd.kernels import (  # noqa: E402
+from boxrad.cpml import make_cpml_state  # noqa: E402
+from boxrad.grid import Grid, allocate_fields, build_cpml_slabs  # noqa: E402
+from boxrad.kernels import (  # noqa: E402
     UpdateCoeffs,
     make_update_coeffs,
     point_source_pressure_increment,
@@ -2665,7 +2665,7 @@ def numerics_recommendation(sw: CpmlSweep) -> dict[str, Any]:
         "cpml_alpha_factor": sw.cpml_alpha_factor,
         "gap_cells": sw.gap_cells,
         "note": (
-            "Set these fields on fdtd.config.Numerics (defaults in config.py); "
+            "Set these fields on boxrad.config.Numerics (defaults in config.py); "
             "cpml_alpha = cpml_alpha_factor * pi * f_min is applied in derive()."
         ),
     }

@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
-from fdtd.post.kirchhoff import (  # noqa: E402
+from boxrad.post.kirchhoff import (
     box_surface_patches,
     dpdn_from_vn,
     far_field_at_radius,
@@ -370,7 +366,7 @@ def test_far_field_matches_kh_pressure_on_axis_large_r() -> None:
 
 
 def test_image_normals_flip_z() -> None:
-    from fdtd.post.kirchhoff import _reflect_normals_z
+    from boxrad.post.kirchhoff import _reflect_normals_z
 
     n = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=_F64)
     n_img = _reflect_normals_z(n, 0.0)
@@ -475,7 +471,7 @@ def test_dtypes_complex128() -> None:
 
 def test_kh_monopole_rigid_plane_image() -> None:
     """Rigid-plane image Green's function matches direct + reflected monopole."""
-    from fdtd.post.kirchhoff import _green, _reflect_points
+    from boxrad.post.kirchhoff import _green, _reflect_points
 
     kf = K[0]
     src = np.array([0.0, 0.0, 0.05], dtype=_F64)
@@ -500,7 +496,7 @@ def test_kh_monopole_rigid_plane_image() -> None:
 
 
 def test_dpdn_from_vn_export() -> None:
-    from fdtd.post.kirchhoff import dpdn_from_vn
+    from boxrad.post.kirchhoff import dpdn_from_vn
 
     vn = np.ones((3, 4), dtype=_C128)
     omega = OMEGA

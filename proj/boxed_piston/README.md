@@ -1,10 +1,11 @@
-# Boxed piston FDTD
+# Boxed piston FDTD (boxrad)
 
-Config-driven 3-D acoustic FDTD for radiation from a radiator on a rigid box (or free-field for Stage A checks). See `docs/brief_v2_fdtd.md`.
+Config-driven 3-D acoustic FDTD for radiation from a radiator on a rigid box (or free-field for Stage A checks). See `docs/brief.md`.
 
 ## Layout
 
-- `fdtd/` — solver modules (`config.py` first)
-- `tests/` — pytest unit tests
+- `boxrad/` — installable solver package (`pip install -e .`)
+- `tests/` — pytest unit tests (require installed `boxrad`)
+- `validation/` — C1–C10 check scripts (not in the wheel; optional extra `bem` for bempp-cl)
 
-Run tests from this directory with `PYTHONPATH=.` (or `pip install -e .` once packaging exists).
+Run a simulation: `boxrad-run configs/default.json` (or `python -m boxrad.run`).

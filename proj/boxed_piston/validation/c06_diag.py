@@ -16,10 +16,10 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# ``validation`` package import (install boxrad separately).
+sys.path.insert(0, str(ROOT))
 
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Config,
     DEFAULT_RAM_LIMIT_BYTES,
     Derived,
@@ -27,11 +27,11 @@ from fdtd.config import (  # noqa: E402
     estimate_memory_bytes,
     validate,
 )
-from fdtd.cpml import make_cpml_state  # noqa: E402
-from fdtd.grid import Grid, allocate_fields  # noqa: E402
-from fdtd.kernels import make_update_coeffs, step  # noqa: E402
-from fdtd.source import velocity_pulse_derivative  # noqa: E402
-from fdtd.source import BoxBoundary  # noqa: E402
+from boxrad.cpml import make_cpml_state  # noqa: E402
+from boxrad.grid import Grid, allocate_fields  # noqa: E402
+from boxrad.kernels import make_update_coeffs, step  # noqa: E402
+from boxrad.source import velocity_pulse_derivative  # noqa: E402
+from boxrad.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 
 _F64 = np.float64

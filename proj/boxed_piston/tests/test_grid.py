@@ -1,4 +1,4 @@
-"""Unit tests for fdtd.grid (Stage A free-field)."""
+"""Unit tests for boxrad.grid (Stage A free-field)."""
 
 from __future__ import annotations
 
@@ -8,10 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Band,
     Config,
     Numerics,
@@ -20,7 +17,7 @@ from fdtd.config import (  # noqa: E402
     derive,
     estimate_memory_bytes,
 )
-from fdtd.grid import (  # noqa: E402
+from boxrad.grid import (  # noqa: E402
     Grid,
     allocate_fields,
     memory_bytes,

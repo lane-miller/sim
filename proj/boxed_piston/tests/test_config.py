@@ -1,17 +1,13 @@
-"""Unit tests for fdtd.config."""
+"""Unit tests for boxrad.config."""
 
 from __future__ import annotations
 
 import math
-import sys
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (
     Air,
     Band,
     Box,
@@ -22,9 +18,9 @@ from fdtd.config import (  # noqa: E402
     derive,
     validate,
 )
-from fdtd.run import run  # noqa: E402
+from boxrad.run import run
 
-CONFIGS = ROOT / "configs"
+CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 SQRT3 = math.sqrt(3.0)
 
@@ -119,7 +115,7 @@ def test_baffle_derives_without_box():
     )
     d = derive(cfg)
     assert d.geometry == "baffle"
-    from fdtd.config import CPML_SIDES_BAFFLE
+    from boxrad.config import CPML_SIDES_BAFFLE
 
     assert d.cpml_sides == CPML_SIDES_BAFFLE
     assert d.box_nz == 0
@@ -136,7 +132,7 @@ def test_box_mode_derive_unchanged_smoke():
     assert d.n_steps == 149
     assert d.h == pytest.approx(0.005, rel=1e-6)
     assert d.geometry == "box"
-    from fdtd.config import CPML_SIDES_ALL
+    from boxrad.config import CPML_SIDES_ALL
 
     assert d.cpml_sides == CPML_SIDES_ALL
 

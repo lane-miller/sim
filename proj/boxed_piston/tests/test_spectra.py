@@ -1,23 +1,17 @@
-"""Tests for fdtd.post.spectra."""
+"""Tests for boxrad.post.spectra."""
 
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from fdtd.post.spectra import (  # noqa: E402
+from boxrad.post.spectra import (
     _DEFAULT_MEMORY_CAP,
     sample_dt_weights,
     spectrum,
     spectrum_rows,
 )
-from fdtd.source import velocity_pulse  # noqa: E402
+from boxrad.source import velocity_pulse
 
 
 def test_spectrum_fft_matches_direct_uniform():

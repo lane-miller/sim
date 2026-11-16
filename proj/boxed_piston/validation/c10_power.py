@@ -17,20 +17,20 @@ import numpy as np
 from numpy.polynomial.legendre import leggauss
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# ``validation`` package import (install boxrad separately).
+sys.path.insert(0, str(ROOT))
 
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Config,
     DEFAULT_RAM_LIMIT_BYTES,
     derive,
     estimate_memory_bytes,
 )
-from fdtd.grid import Grid  # noqa: E402
-from fdtd.post.kirchhoff import dpdn_from_vn, kh_pressure  # noqa: E402
-from fdtd.post.zrad import zrad_from_h5  # noqa: E402
-from fdtd.run import estimate_output_bytes, run  # noqa: E402
-from fdtd.source import BoxBoundary  # noqa: E402
+from boxrad.grid import Grid  # noqa: E402
+from boxrad.post.kirchhoff import dpdn_from_vn, kh_pressure  # noqa: E402
+from boxrad.post.zrad import zrad_from_h5  # noqa: E402
+from boxrad.run import estimate_output_bytes, run  # noqa: E402
+from boxrad.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 
 _H_OVERRIDE_M = 0.005

@@ -8,10 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Band,
     Box,
     Config,
@@ -21,7 +18,7 @@ from fdtd.config import (  # noqa: E402
     derive,
     validate,
 )
-from fdtd.grid import (  # noqa: E402
+from boxrad.grid import (  # noqa: E402
     Grid,
     _radiator_face_weights,
     validate_box_radiator_on_grid,

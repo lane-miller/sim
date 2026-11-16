@@ -1,4 +1,4 @@
-# Run length and n_steps come only from :func:`fdtd.config.derive` (``Derived.n_steps``).
+# Run length and n_steps come only from :func:`boxrad.config.derive` (``Derived.n_steps``).
 # This module does not invent a step count or end time when Derived lacks them.
 
 """FDTD run driver: config validation, time stepping, HDF5 output."""
@@ -6,21 +6,19 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-if __name__ == "__main__" and not __package__:
-    import sys
-    from pathlib import Path as _Path
-
-    sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
-    
-from fdtd.config import (
+from boxrad.config import (
     DEFAULT_RAM_LIMIT_BYTES,
     Config,
     Derived,
@@ -28,16 +26,16 @@ from fdtd.config import (
     estimate_memory_bytes,
     validate,
 )
-from fdtd.cpml import make_cpml_state
-from fdtd.grid import Grid, allocate_fields
-from fdtd.kernels import make_update_coeffs, step
-from fdtd.post.kirchhoff import (
+from boxrad.cpml import make_cpml_state
+from boxrad.grid import Grid, allocate_fields
+from boxrad.kernels import make_update_coeffs, step
+from boxrad.post.kirchhoff import (
     box_surface_patches,
     huygens_box_patches,
     huygens_open_patches,
 )
-from fdtd.recorder import Recorder, decimation_factor, resolve_huygens_offset
-from fdtd.source import BoxBoundary
+from boxrad.recorder import Recorder, decimation_factor, resolve_huygens_offset
+from boxrad.source import BoxBoundary
 
 try:
     import numba
@@ -338,16 +336,36 @@ def run(
     return dest
 
 
-def _main(argv: list[str] | None = None) -> int:
+@contextmanager
+def keep_awake(label: str) -> Generator[None, None, None]:
+    """On macOS, run ``caffeinate -i -w <pid>`` for the wrapped block; no-op elsewhere."""
+    _ = label
+    proc: subprocess.Popen[bytes] | None = None
+    if sys.platform == "darwin" and shutil.which("caffeinate"):
+        proc = subprocess.Popen(
+            ["caffeinate", "-i", "-w", str(os.getpid())],
+        )
+        print(f"[keep_awake] caffeinate started (pid {proc.pid})", flush=True)
+    try:
+        yield
+    finally:
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Boxed-piston FDTD run driver")
     parser.add_argument("config", type=Path, help="JSON config path")
     parser.add_argument("-o", "--output", type=Path, default=None, help="HDF5 output path")
     parser.add_argument("--dry-run", action="store_true", help="Validate and print summary only")
     parser.add_argument("--quiet", action="store_true", help="Disable progress lines")
     args = parser.parse_args(argv)
-    from validation._common import keep_awake
 
-    with keep_awake("fdtd.run"):
+    with keep_awake("boxrad.run"):
         try:
             result = run(
                 args.config,
@@ -369,4 +387,4 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(_main())
+    raise SystemExit(main())

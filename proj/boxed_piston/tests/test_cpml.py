@@ -1,17 +1,11 @@
-"""Unit tests for fdtd.cpml (CFS-PML slab updates)."""
+"""Unit tests for boxrad.cpml (CFS-PML slab updates)."""
 
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Air,
     Band,
     Config,
@@ -23,7 +17,7 @@ from fdtd.config import (  # noqa: E402
 )
 import math
 
-from fdtd.cpml import (  # noqa: E402
+from boxrad.cpml import (  # noqa: E402
     CpmlCoeffs,
     CpmlFaceRows,
     CpmlState,
@@ -37,8 +31,8 @@ from fdtd.cpml import (  # noqa: E402
     face_rows,
     make_cpml_state,
 )
-from fdtd.grid import Fields, Grid, allocate_fields, build_cpml_slabs  # noqa: E402
-from fdtd.kernels import (  # noqa: E402
+from boxrad.grid import Fields, Grid, allocate_fields, build_cpml_slabs  # noqa: E402
+from boxrad.kernels import (  # noqa: E402
     make_update_coeffs,
     step,
     step_numpy,
@@ -69,7 +63,7 @@ def _profile_b_a_at_d(
     m: float,
     dt: float,
 ) -> tuple[float, float]:
-    """``(b, a)`` at normalized depth *d_over_L* (matches :func:`fdtd.cpml._profile_row`)."""
+    """``(b, a)`` at normalized depth *d_over_L* (matches :func:`boxrad.cpml._profile_row`)."""
     d_over_L = min(max(d_over_L, 0.0), 1.0)
     power = d_over_L**m
     sigma = sigma_max * power
@@ -112,7 +106,7 @@ def _assert_profile_b_a_monotone(
 def _sigma_v_profile(
     n_cells: int, neg: bool, sigma_max: float, m: float
 ) -> np.ndarray:
-    """σ(d) on velocity faces (matches :func:`fdtd.cpml._profile_row_v` depths)."""
+    """σ(d) on velocity faces (matches :func:`boxrad.cpml._profile_row_v` depths)."""
     denom = max(n_cells, 1)
     out = np.empty(n_cells + 1, dtype=np.float64)
     for q in range(n_cells + 1):
@@ -320,7 +314,7 @@ def test_all_cpml_sides_matches_pre_side_dispatch_regression():
     apply_p(f_nb, cpml_st, coeffs, sides=_CPML_SIDES_ALL)
 
     p, vx, vy, vz = f_np.p, f_np.vx, f_np.vy, f_np.vz
-    from fdtd.cpml import apply_v_numpy, apply_p_numpy
+    from boxrad.cpml import apply_v_numpy, apply_p_numpy
 
     zero_rigid_face_velocities(vx, vy, vz)
     update_v(p, vx, vy, vz, coeffs.cv, 0, nx, 0, ny, 0, nz)

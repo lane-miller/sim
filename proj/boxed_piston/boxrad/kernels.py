@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit, prange
 
-from fdtd.grid import CpmlSlabs, Fields
+from boxrad.grid import CpmlSlabs, Fields
 
 _FLOAT32 = np.dtype(np.float32)
 _COURANT_LIMIT = np.float32(1.0 + 5e-6)
@@ -91,7 +91,7 @@ def update_v(
 
     Linearised Euler on all faces except the outer rigid boundaries
     (``vx[0]``, ``vx[nx]``, etc.). CPML slab cells use the same plain
-    derivatives here; :mod:`fdtd.cpml` adds convolutional corrections in slabs.
+    derivatives here; :mod:`boxrad.cpml` adds convolutional corrections in slabs.
 
     Index ranges ``[i_lo, i_hi)`` span pressure cell indices (typically the
     full domain ``0 … nx``).
@@ -290,7 +290,7 @@ def step(
     2. ``update_v`` — advance ``v^{n-½} → v^{n+½}`` using ``p^n``
     3. optional ``cpml.apply_v`` — convolutional corrections in CPML slabs
     4. ``zero_rigid_face_velocities`` again on outer faces
-    5. optional :class:`fdtd.source.BoxBoundary` — rigid box faces, then radiator
+    5. optional :class:`boxrad.source.BoxBoundary` — rigid box faces, then radiator
        ``v_n = w · velocity_pulse((n + ½) Δt)`` (after step 4, before *p* update)
     6. ``update_p`` — advance ``p^n → p^{n+1}`` using ``v^{n+½}``
     7. optional ``cpml.apply_p`` — CPML corrections on pressure update
@@ -314,7 +314,7 @@ def step(
         k_hi,
     )
     if cpml is not None:
-        from fdtd.cpml import apply_v as cpml_apply_v
+        from boxrad.cpml import apply_v as cpml_apply_v
 
         cpml_apply_v(fields, cpml, coeffs)
     zero_rigid_face_velocities(fields.vx, fields.vy, fields.vz)
@@ -334,7 +334,7 @@ def step(
         k_hi,
     )
     if cpml is not None:
-        from fdtd.cpml import apply_p as cpml_apply_p
+        from boxrad.cpml import apply_p as cpml_apply_p
 
         cpml_apply_p(fields, cpml, coeffs)
 
@@ -358,7 +358,7 @@ def step_numpy(
     if cpml is not None:
         if fields is None:
             raise ValueError("fields required when cpml is set for step_numpy")
-        from fdtd.cpml import apply_v_numpy as cpml_apply_v_numpy
+        from boxrad.cpml import apply_v_numpy as cpml_apply_v_numpy
 
         cpml_apply_v_numpy(p, vx, vy, vz, fields, coeffs, cpml)
     zero_rigid_face_velocities(vx, vy, vz)
@@ -366,6 +366,6 @@ def step_numpy(
         boundary.apply(vx, vy, vz, n)
     update_p_numpy(p, vx, vy, vz, coeffs.cp, i_lo, i_hi, j_lo, j_hi, k_lo, k_hi)
     if cpml is not None:
-        from fdtd.cpml import apply_p_numpy as cpml_apply_p_numpy
+        from boxrad.cpml import apply_p_numpy as cpml_apply_p_numpy
 
         cpml_apply_p_numpy(p, vx, vy, vz, fields, coeffs, cpml)

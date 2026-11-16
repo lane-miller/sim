@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "boxrad"
+version = "0.1.0"
+description = "3-D acoustic FDTD for boxed-piston radiation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "numba",
+    "h5py",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+bem = ["bempp-cl"]
+
+[project.scripts]
+boxrad-run = "boxrad.run:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["boxrad*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

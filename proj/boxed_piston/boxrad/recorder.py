@@ -10,14 +10,14 @@ from typing import Any
 
 import numpy as np
 
-from fdtd.config import Config, Derived
-from fdtd.grid import Fields, Grid
-from fdtd.post.kirchhoff import (
+from boxrad.config import Config, Derived
+from boxrad.grid import Fields, Grid
+from boxrad.post.kirchhoff import (
     box_surface_patches,
     huygens_box_patches,
     huygens_open_patches,
 )
-from fdtd.source import (
+from boxrad.source import (
     BoxBoundary,
     velocity_at_half_step,
     velocity_pulse,
@@ -109,7 +109,7 @@ def validate_huygens_patches_interior(grid: Grid, patches) -> None:
 def _require_h5py() -> Any:
     if h5py is None:
         raise ImportError(
-            "h5py is required for fdtd.recorder but is not installed in this environment"
+            "h5py is required for boxrad.recorder but is not installed in this environment"
         )
     return h5py
 
@@ -636,11 +636,11 @@ class Recorder:
             self._w_pr_tp = None
 
     def _time_p_after_step(self, n: int) -> float:
-        """Pressure time level after :func:`fdtd.kernels.step` with index *n*."""
+        """Pressure time level after :func:`boxrad.kernels.step` with index *n*."""
         return (float(n) + 1.0) * self.dt
 
     def _time_v_after_step(self, n: int) -> float:
-        """Staggered velocity time level after :func:`fdtd.kernels.step` with index *n*."""
+        """Staggered velocity time level after :func:`boxrad.kernels.step` with index *n*."""
         return (float(n) + 0.5) * self.dt
 
     def _radiator_p_avg(self, p_flat: np.ndarray, n: int) -> float:
@@ -686,7 +686,7 @@ class Recorder:
         return out
 
     def sample(self, fields: Fields, n: int) -> None:
-        """Record fields after :func:`fdtd.kernels.step` with index *n* (``p^{n+1}``, ``v^{n+½}``)."""
+        """Record fields after :func:`boxrad.kernels.step` with index *n* (``p^{n+1}``, ``v^{n+½}``)."""
         if n != self._step:
             raise ValueError(f"expected step {self._step}, got {n}")
         t_p = self._time_p_after_step(n)

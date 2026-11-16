@@ -21,12 +21,12 @@ from typing import Any, Literal
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# ``validation`` package import (install boxrad separately).
+sys.path.insert(0, str(ROOT))
 
 import validation._common as vc  # noqa: E402
 
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Air,
     Band,
     Config,
@@ -38,9 +38,9 @@ from fdtd.config import (  # noqa: E402
     derive,
     estimate_memory_bytes,
 )
-from fdtd.cpml import make_cpml_state  # noqa: E402
-from fdtd.grid import Grid, allocate_fields, build_cpml_slabs  # noqa: E402
-from fdtd.kernels import (  # noqa: E402
+from boxrad.cpml import make_cpml_state  # noqa: E402
+from boxrad.grid import Grid, allocate_fields, build_cpml_slabs  # noqa: E402
+from boxrad.kernels import (  # noqa: E402
     UpdateCoeffs,
     inject_point_source,
     make_update_coeffs,

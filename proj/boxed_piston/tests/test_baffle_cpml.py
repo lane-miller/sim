@@ -9,10 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Band,
     Config,
     CPML_SIDES_BAFFLE,
@@ -22,10 +19,10 @@ from fdtd.config import (  # noqa: E402
     SQRT3,
     derive,
 )
-from fdtd.cpml import apply_p, make_cpml_state  # noqa: E402
-from fdtd.grid import Grid, allocate_fields  # noqa: E402
-from fdtd.kernels import make_update_coeffs, step  # noqa: E402
-from fdtd.source import BoxBoundary  # noqa: E402
+from boxrad.cpml import apply_p, make_cpml_state  # noqa: E402
+from boxrad.grid import Grid, allocate_fields  # noqa: E402
+from boxrad.kernels import make_update_coeffs, step  # noqa: E402
+from boxrad.source import BoxBoundary  # noqa: E402
 
 _F64 = np.float64
 

@@ -1,9 +1,8 @@
-"""Synthetic HDF5 tests for fdtd.post.zrad (no FDTD run)."""
+"""Synthetic HDF5 tests for boxrad.post.zrad (no FDTD run)."""
 
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
@@ -11,15 +10,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
 h5py = pytest.importorskip("h5py")
 
-from fdtd.config import Air, Band, Box, Config, Numerics, Output, Radiator, derive  # noqa: E402
-from fdtd.post.spectra import spectrum  # noqa: E402
-from fdtd.post.zrad import zrad_from_h5  # noqa: E402
-from fdtd.source import velocity_pulse, velocity_pulse_derivative  # noqa: E402
+from boxrad.config import Air, Band, Box, Config, Numerics, Output, Radiator, derive
+from boxrad.post.spectra import spectrum
+from boxrad.post.zrad import zrad_from_h5
+from boxrad.source import velocity_pulse, velocity_pulse_derivative
 
 
 def _write_synthetic_h5(path: Path, p_avg: np.ndarray, cfg: Config, derived) -> None:

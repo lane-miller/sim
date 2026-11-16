@@ -8,8 +8,8 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit
 
-from fdtd.config import Derived
-from fdtd.grid import Grid
+from boxrad.config import Derived
+from boxrad.grid import Grid
 
 _FLOAT32 = np.dtype(np.float32)
 
@@ -24,7 +24,7 @@ def velocity_pulse(t: float, sigma: float, t0: float) -> float:
     """Unit-amplitude Gaussian velocity pulse (no time derivative).
 
     ``v(t) = exp(−(t − t0)² / (2σ²))``, peak 1 at ``t = t0``.
-    ``σ`` and ``t0`` come from :func:`fdtd.config.derive`.
+    ``σ`` and ``t0`` come from :func:`boxrad.config.derive`.
     """
     z = (t - t0) / sigma
     return math.exp(-0.5 * z * z)

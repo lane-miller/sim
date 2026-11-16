@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from fdtd.config import Config, Derived, Radiator
+from boxrad.config import Config, Derived, Radiator
 
 _FLOAT32 = np.dtype(np.float32)
 _F64 = np.float64

@@ -15,28 +15,28 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# ``validation`` package import (install boxrad separately).
+sys.path.insert(0, str(ROOT))
 
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Config,
     DEFAULT_RAM_LIMIT_BYTES,
     _radiator_D,
     derive,
     estimate_memory_bytes,
 )
-from fdtd.grid import Grid  # noqa: E402
-from fdtd.post.kirchhoff import (  # noqa: E402
+from boxrad.grid import Grid  # noqa: E402
+from boxrad.post.kirchhoff import (  # noqa: E402
     SurfacePatches,
     dpdn_from_vn,
     kh_pressure,
     kh_pressure_loop,
 )
-from fdtd.post.reference import z_baffled_circle  # noqa: E402
-from fdtd.post.spectra import spectrum  # noqa: E402
-from fdtd.post.zrad import causal_end_taper, zrad_from_h5  # noqa: E402
-from fdtd.run import run  # noqa: E402
-from fdtd.source import BoxBoundary  # noqa: E402
+from boxrad.post.reference import z_baffled_circle  # noqa: E402
+from boxrad.post.spectra import spectrum  # noqa: E402
+from boxrad.post.zrad import causal_end_taper, zrad_from_h5  # noqa: E402
+from boxrad.run import run  # noqa: E402
+from boxrad.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 
 _G1_PPW = (10, 15, 20, 30)

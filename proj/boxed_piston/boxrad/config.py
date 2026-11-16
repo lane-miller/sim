@@ -212,7 +212,7 @@ def _domain_counts(
 
 
 def estimate_memory_bytes(nx: int, ny: int, nz: int, cpml_cells: int) -> int:
-    """Analytic byte count matching :func:`fdtd.grid.allocate_fields` (for pre-flight).
+    """Analytic byte count matching :func:`boxrad.grid.allocate_fields` (for pre-flight).
 
     Main Yee fields use staggered shapes ``(nx, ny, nz)``, ``(nx+1, ny, nz)``, etc.,
     not four equal cubes. CPML ``ψ`` arrays are sized to face slabs only; corner cells

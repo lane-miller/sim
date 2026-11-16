@@ -19,8 +19,8 @@ import numpy as np
 
 _RunKey = TypeVar("_RunKey")
 
-from fdtd.config import DEFAULT_RAM_LIMIT_BYTES, Config, SQRT3, estimate_memory_bytes
-from fdtd.grid import Grid
+from boxrad.config import DEFAULT_RAM_LIMIT_BYTES, Config, SQRT3, estimate_memory_bytes
+from boxrad.grid import Grid
 
 TUKEY_ALPHA = 0.25
 END_TAPER_FRAC = TUKEY_ALPHA
@@ -75,8 +75,8 @@ def workdir_disk_parent(*, keep: bool) -> Path:
 
 
 def planned_h5_bytes(cfgs: Iterable[Config]) -> int:
-    from fdtd.config import derive
-    from fdtd.run import estimate_output_bytes
+    from boxrad.config import derive
+    from boxrad.run import estimate_output_bytes
 
     total = 0
     for cfg in cfgs:
@@ -832,7 +832,7 @@ def box_mode_probe_targets(
     derived: object,
 ) -> list[tuple[float, float, float]]:
     """Mid-gap probe locations used in C8/C9 (Huygens–CPML), snapped to the grid."""
-    from fdtd.recorder import resolve_huygens_offset
+    from boxrad.recorder import resolve_huygens_offset
 
     offset = resolve_huygens_offset(cfg)
     gap = int(derived.gap_cells)  # type: ignore[attr-defined]
@@ -859,10 +859,10 @@ def load_huygens_spectra(
     """Huygens face spectra and radiator ``V(f)`` (C6/C8 transfer-function convention)."""
     import h5py
 
-    from fdtd.post.kirchhoff import SurfacePatches
-    from fdtd.post.spectra import spectrum, spectrum_rows
-    from fdtd.post.zrad import causal_end_taper
-    from fdtd.source import velocity_pulse
+    from boxrad.post.kirchhoff import SurfacePatches
+    from boxrad.post.spectra import spectrum, spectrum_rows
+    from boxrad.post.zrad import causal_end_taper
+    from boxrad.source import velocity_pulse
 
     with h5py.File(path, "r") as f:
         centers = np.asarray(f["huygens/centers"][()], dtype=np.float64)
@@ -893,8 +893,8 @@ def load_radiator_velocity_spectrum(path: Path, derived: object, f_hz: float) ->
     """Radiator velocity spectrum ``V(f)`` at pressure sample times."""
     import h5py
 
-    from fdtd.post.spectra import spectrum
-    from fdtd.source import velocity_pulse
+    from boxrad.post.spectra import spectrum
+    from boxrad.source import velocity_pulse
 
     with h5py.File(path, "r") as f:
         t_rad = np.asarray(f["radiator/times_p"][()], dtype=np.float64)
@@ -909,8 +909,8 @@ def load_box_surface_spectrum(path: Path, f_hz: float) -> tuple[np.ndarray, np.n
     """Box-face pressure row spectrum at stored sample times."""
     import h5py
 
-    from fdtd.post.spectra import spectrum_rows
-    from fdtd.post.zrad import causal_end_taper
+    from boxrad.post.spectra import spectrum_rows
+    from boxrad.post.zrad import causal_end_taper
 
     with h5py.File(path, "r") as f:
         if "box_surface" not in f:

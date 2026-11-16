@@ -8,9 +8,9 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit, prange
 
-from fdtd.config import Config, Derived
-from fdtd.grid import CpmlSlabs, Fields, Grid
-from fdtd.kernels import UpdateCoeffs
+from boxrad.config import Config, Derived
+from boxrad.grid import CpmlSlabs, Fields, Grid
+from boxrad.kernels import UpdateCoeffs
 
 _FLOAT32 = np.dtype(np.float32)
 

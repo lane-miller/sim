@@ -1,20 +1,15 @@
-"""Tests for fdtd.post.reference (baffled Z_rad)."""
+"""Tests for boxrad.post.reference (baffled Z_rad)."""
 
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
 pytest.importorskip("scipy")
 
-from fdtd.post.reference import (  # noqa: E402
+from boxrad.post.reference import (
     _moment_closed,
     _moment_series,
     z_baffled_circle,

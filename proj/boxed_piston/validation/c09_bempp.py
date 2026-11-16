@@ -16,17 +16,17 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# ``validation`` package import (install boxrad separately).
+sys.path.insert(0, str(ROOT))
 
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Config,
     DEFAULT_RAM_LIMIT_BYTES,
     derive,
     estimate_memory_bytes,
 )
-from fdtd.grid import Grid  # noqa: E402
-from fdtd.post.bem_ref import (  # noqa: E402
+from boxrad.grid import Grid  # noqa: E402
+from boxrad.post.bem_ref import (  # noqa: E402
     BoxMeshCache,
     c09_bem_cache_path,
     c09_geometry_signature,
@@ -41,14 +41,14 @@ from fdtd.post.bem_ref import (  # noqa: E402
     solve_neumann_bm,
     zrad_sphere_analytic,
 )
-from fdtd.post.kirchhoff import (  # noqa: E402
+from boxrad.post.kirchhoff import (  # noqa: E402
     dpdn_from_vn,
     kh_pressure,
     kh_pressure_loop,
 )
-from fdtd.post.spectra import spectrum  # noqa: E402
-from fdtd.post.zrad import causal_end_taper, zrad_from_h5  # noqa: E402
-from fdtd.run import estimate_output_bytes, run  # noqa: E402
+from boxrad.post.spectra import spectrum  # noqa: E402
+from boxrad.post.zrad import causal_end_taper, zrad_from_h5  # noqa: E402
+from boxrad.run import estimate_output_bytes, run  # noqa: E402
 import validation._common as vc  # noqa: E402
 
 _G0_KA = (0.2, 1.0, math.pi, 4.0)

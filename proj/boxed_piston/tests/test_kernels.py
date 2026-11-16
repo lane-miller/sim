@@ -1,4 +1,4 @@
-"""Unit tests for fdtd.kernels (Stage A interior leapfrog)."""
+"""Unit tests for boxrad.kernels (Stage A interior leapfrog)."""
 
 from __future__ import annotations
 
@@ -8,10 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from fdtd.config import (  # noqa: E402
+from boxrad.config import (  # noqa: E402
     Air,
     Band,
     Config,
@@ -21,8 +18,8 @@ from fdtd.config import (  # noqa: E402
     SQRT3,
     derive,
 )
-from fdtd.grid import Grid, allocate_fields, build_cpml_slabs  # noqa: E402
-from fdtd.kernels import courant, make_update_coeffs, step, step_numpy  # noqa: E402
+from boxrad.grid import Grid, allocate_fields, build_cpml_slabs  # noqa: E402
+from boxrad.kernels import courant, make_update_coeffs, step, step_numpy  # noqa: E402
 
 _FLOAT32 = np.dtype(np.float32)
 

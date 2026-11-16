@@ -1,4 +1,4 @@
-"""Unit tests for fdtd.post.bem_ref (BEM box mesh and pulsating-sphere check)."""
+"""Unit tests for boxrad.post.bem_ref (BEM box mesh and pulsating-sphere check)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import bempp_cl.api as bempp
 import numpy as np
 import pytest
 
-from fdtd.post.bem_ref import (
+from boxrad.post.bem_ref import (
     BOX_TAG,
     RADIATOR_TAG,
     BoxMeshCache,
