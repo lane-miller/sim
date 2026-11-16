@@ -104,12 +104,6 @@ def _h_exact_on_axis(z: float, f: float, *, a: float, rho: float, c: float) -> c
     )
 
 
-def _h_transfer_err(h_ref: complex, h: complex) -> tuple[float, float]:
-    db = 20.0 * math.log10(abs(h) / max(abs(h_ref), 1e-30))
-    ph = float(np.rad2deg(np.angle(h) - np.angle(h_ref)))
-    return db, ph
-
-
 def maybe_plot_z(
     ka: np.ndarray,
     z: np.ndarray,
@@ -293,7 +287,7 @@ def _c06_body(args: argparse.Namespace) -> int:
             )[0, 0]
             H_kh = p_int / V
             H_ex = _h_exact_on_axis(r_far, f_hz, a=a, rho=rho, c=c)
-            db_gate, ph_gate = _h_transfer_err(H_ex, H_kh)
+            db_gate, ph_gate = vc.h_transfer_err(H_ex, H_kh)
 
             ff = kh_far_field(
                 np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
@@ -307,7 +301,7 @@ def _c06_body(args: argparse.Namespace) -> int:
                 np.asarray([[ff]], dtype=np.complex128), k_sel, R_ref=r_far
             )[0, 0]
             H_ff = p_ff / V
-            db_ff, ph_ff = _h_transfer_err(H_kh, H_ff)
+            db_ff, ph_ff = vc.h_transfer_err(H_kh, H_ff)
 
             pts = r_far * dir_ax
             with vc.timed_section(f"KH directivity ka={ka_tgt:g} f={f_hz:.1f} Hz"):
@@ -366,8 +360,8 @@ def _c06_body(args: argparse.Namespace) -> int:
                     )[0, 0]
                     H_kh_z = p_kh / V
                     H_ex_z = _h_exact_on_axis(z_m, f_hz, a=a, rho=rho, c=c)
-                    db_kh, ph_kh = _h_transfer_err(H_fd, H_kh_z)
-                    db_ex, ph_ex = _h_transfer_err(H_fd, H_ex_z)
+                    db_kh, ph_kh = vc.h_transfer_err(H_fd, H_kh_z)
+                    db_ex, ph_ex = vc.h_transfer_err(H_fd, H_ex_z)
                     probes_kh.append(
                         {
                             "z_m": z_m,

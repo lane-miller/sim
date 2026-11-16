@@ -801,6 +801,129 @@ def runs_on_common_ka(
     return ka_grid, aligned, meta
 
 
+def h_transfer_err(h_ref: complex, h: complex) -> tuple[float, float]:
+    """Compare transfer phasors H (dB and phase deg relative to *h_ref*)."""
+    db = 20.0 * math.log10(abs(h) / max(abs(h_ref), 1e-30))
+    ph = float(np.rad2deg(np.angle(h) - np.angle(h_ref)))
+    while ph > 180.0:
+        ph -= 360.0
+    while ph < -180.0:
+        ph += 360.0
+    return db, ph
+
+
+def richardson_extrap_complex(
+    z_coarse: complex,
+    z_fine: complex,
+    *,
+    r: float,
+    p: float,
+) -> complex:
+    """Richardson extrapolation to zero mesh spacing from two mesh levels."""
+    denom = float(r) ** float(p) - 1.0
+    if abs(denom) < 1e-30:
+        return z_fine
+    return z_fine + (z_fine - z_coarse) / denom
+
+
+def box_mode_probe_targets(
+    cfg: Config,
+    grid: Grid,
+    derived: object,
+) -> list[tuple[float, float, float]]:
+    """Mid-gap probe locations used in C8/C9 (Huygens–CPML), snapped to the grid."""
+    from fdtd.recorder import resolve_huygens_offset
+
+    offset = resolve_huygens_offset(cfg)
+    gap = int(derived.gap_cells)  # type: ignore[attr-defined]
+    g_cells = 0.5 * (offset + gap)
+    g = g_cells * grid.h
+    W, D = grid.realized_W, grid.realized_D
+    nominal = [
+        (0.0, 0.0, g),
+        (0.5 * W + g, 0.0, -0.5 * D),
+        (0.0, 0.0, -D - g),
+    ]
+    snapped: list[tuple[float, float, float]] = []
+    for x, y, z in nominal:
+        i, j, k = grid.index_of(x, y, z)
+        snapped.append(grid.coords_of(i, j, k))
+    return snapped
+
+
+def load_huygens_spectra(
+    path: Path,
+    derived: object,
+    f_hz: float,
+) -> tuple[Any, complex, np.ndarray, np.ndarray]:
+    """Huygens face spectra and radiator ``V(f)`` (C6/C8 transfer-function convention)."""
+    import h5py
+
+    from fdtd.post.kirchhoff import SurfacePatches
+    from fdtd.post.spectra import spectrum, spectrum_rows
+    from fdtd.post.zrad import causal_end_taper
+    from fdtd.source import velocity_pulse
+
+    with h5py.File(path, "r") as f:
+        centers = np.asarray(f["huygens/centers"][()], dtype=np.float64)
+        normals = np.asarray(f["huygens/normals"][()], dtype=np.float64)
+        areas = np.asarray(f["huygens/areas"][()], dtype=np.float64)
+        patches = SurfacePatches(centers, normals, areas, float(derived.h))  # type: ignore[attr-defined]
+        t_p = np.asarray(f["huygens/times_p"][()], dtype=np.float64)
+        t_v = np.asarray(f["huygens/times_vn"][()], dtype=np.float64)
+        p_ts = np.asarray(f["huygens/p_face"][()], dtype=np.float64)
+        vn_ts = np.asarray(f["huygens/vn"][()], dtype=np.float64)
+        t_rad = np.asarray(f["radiator/times_p"][()], dtype=np.float64)
+        v_rad = np.array(
+            [velocity_pulse(float(t), derived.pulse_sigma, derived.pulse_t0) for t in t_rad],  # type: ignore[attr-defined]
+            dtype=np.float64,
+        )
+    n_samp = p_ts.shape[0]
+    win = causal_end_taper(n_samp)
+    p_win = p_ts * win[:, np.newaxis]
+    vn_win = vn_ts * win[:, np.newaxis]
+    with timed_section(f"huygens spectrum f={f_hz:.1f} Hz"):
+        V = complex(spectrum(v_rad, t_rad, f_hz))
+        p_face = np.asarray(spectrum_rows(p_win, t_p, f_hz), dtype=np.complex128)
+        vn_face = np.asarray(spectrum_rows(vn_win, t_v, f_hz), dtype=np.complex128)
+    return patches, V, p_face, vn_face
+
+
+def load_radiator_velocity_spectrum(path: Path, derived: object, f_hz: float) -> complex:
+    """Radiator velocity spectrum ``V(f)`` at pressure sample times."""
+    import h5py
+
+    from fdtd.post.spectra import spectrum
+    from fdtd.source import velocity_pulse
+
+    with h5py.File(path, "r") as f:
+        t_rad = np.asarray(f["radiator/times_p"][()], dtype=np.float64)
+        v_rad = np.array(
+            [velocity_pulse(float(t), derived.pulse_sigma, derived.pulse_t0) for t in t_rad],  # type: ignore[attr-defined]
+            dtype=np.float64,
+        )
+    return complex(spectrum(v_rad, t_rad, f_hz))
+
+
+def load_box_surface_spectrum(path: Path, f_hz: float) -> tuple[np.ndarray, np.ndarray]:
+    """Box-face pressure row spectrum at stored sample times."""
+    import h5py
+
+    from fdtd.post.spectra import spectrum_rows
+    from fdtd.post.zrad import causal_end_taper
+
+    with h5py.File(path, "r") as f:
+        if "box_surface" not in f:
+            raise RuntimeError("HDF5 missing box_surface group")
+        centers = np.asarray(f["box_surface/centers"][()], dtype=np.float64)
+        t = np.asarray(f["box_surface/times"][()], dtype=np.float64)
+        p_ts = np.asarray(f["box_surface/p"][()], dtype=np.float64)
+    win = causal_end_taper(p_ts.shape[0])
+    p_win = p_ts * win[:, np.newaxis]
+    p_spec = np.asarray(spectrum_rows(p_win, t, f_hz), dtype=np.complex128)
+    return centers, p_spec.ravel()
+
+
 def print_runtime_summary(run_timer: RunTimer, phases: tuple[str, ...]) -> None:
     total = run_timer.elapsed()
     print("\n=== Runtime (wall) ===", flush=True)

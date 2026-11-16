@@ -8,10 +8,13 @@ before any comparison with FDTD or published references.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import time
 from dataclasses import dataclass
-from typing import Sequence
+from pathlib import Path
+from typing import Any, Sequence
 
 import bempp_cl.api as bempp
 import numpy as np
@@ -22,7 +25,7 @@ RADIATOR_TAG = 1
 BOX_TAG = 2
 _DENSE_MAX_GB = 3.0
 _GMRES_RTOL = 1e-5
-_DEFAULT_EPW = 10
+_DEFAULT_EPW = 12
 _DEFAULT_H_MAX_M = 0.02
 _F64 = np.float64
 _C128 = np.complex128
@@ -66,10 +69,10 @@ def dedupe_frequencies_hz(freqs: Sequence[float], *, sep_hz: float = 1.0) -> np.
 
 
 class BoxMeshCache:
-    """Reuse :func:`box_mesh` grids keyed by rounded *h_target* (m)."""
+    """Reuse :func:`box_mesh` grids keyed by rounded (*h_target*, *h_rad*) (m)."""
 
     def __init__(self) -> None:
-        self._grids: dict[float, bempp.Grid] = {}
+        self._grids: dict[tuple[float, float], bempp.Grid] = {}
 
     def get(
         self,
@@ -79,10 +82,16 @@ class BoxMeshCache:
         rad_rect: tuple[float, float],
         origin: tuple[float, float, float],
         h_target: float,
+        *,
+        h_rad: float | None = None,
     ) -> bempp.Grid:
-        key = round(float(h_target), 12)
+        rw, rh = float(rad_rect[0]), float(rad_rect[1])
+        h_rad_eff = min(rw, rh) / 8.0 if h_rad is None else float(h_rad)
+        key = (round(float(h_target), 12), round(h_rad_eff, 12))
         if key not in self._grids:
-            self._grids[key] = box_mesh(W, H, D, rad_rect, origin, h_target)
+            self._grids[key] = box_mesh(
+                W, H, D, rad_rect, origin, h_target, h_rad=h_rad_eff
+            )
         return self._grids[key]
 
 
@@ -122,12 +131,118 @@ def to_plus_jwt(z: np.ndarray | complex) -> np.ndarray | complex:
     return np.conj(np.asarray(z, dtype=_C128))
 
 
+def _grid_vertices_3d(grid: object) -> np.ndarray:
+    """Vertex coordinates as (n_vertices, 3)."""
+    return np.asarray(grid.vertices, dtype=_F64).T
+
+
+def _grid_elements(grid: object) -> np.ndarray:
+    """Triangle vertex indices (n_elements, 3); row e matches BEM local DOF columns."""
+    return np.asarray(grid.elements, dtype=np.int32).T
+
+
+def _triangle_barycentric_weights(
+    points: np.ndarray,
+    v0: np.ndarray,
+    v1: np.ndarray,
+    v2: np.ndarray,
+) -> np.ndarray:
+    """Barycentric weights (N, E, 3); λ[..., i] is the weight of vertex v_i (Σλ = 1)."""
+    pts = points[:, np.newaxis, :]
+    e10 = v1[np.newaxis, :, :] - v0[np.newaxis, :, :]
+    e20 = v2[np.newaxis, :, :] - v0[np.newaxis, :, :]
+    w = pts - v0[np.newaxis, :, :]
+    dot00 = np.sum(e10 * e10, axis=-1)
+    dot01 = np.sum(e10 * e20, axis=-1)
+    dot02 = np.sum(e10 * w, axis=-1)
+    dot11 = np.sum(e20 * e20, axis=-1)
+    dot12 = np.sum(e20 * w, axis=-1)
+    inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01 + 1e-300)
+    lam1 = (dot11 * dot02 - dot01 * dot12) * inv_denom
+    lam2 = (dot00 * dot12 - dot01 * dot02) * inv_denom
+    lam0 = 1.0 - lam1 - lam2
+    return np.stack([lam0, lam1, lam2], axis=-1)
+
+
+def _triangle_max_edge(v0: np.ndarray, v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
+    e01 = np.linalg.norm(v1 - v0, axis=-1)
+    e12 = np.linalg.norm(v2 - v1, axis=-1)
+    e20 = np.linalg.norm(v0 - v2, axis=-1)
+    return np.maximum(np.maximum(e01, e12), e20)
+
+
+def _locate_points_on_surface_mesh(
+    points: np.ndarray,
+    grid: object,
+    *,
+    tol_scale: float = 1e-9,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (element_index, barycentric_weights) per point; raise if off-surface."""
+    verts = _grid_vertices_3d(grid)
+    elems = _grid_elements(grid)
+    v0 = verts[elems[:, 0]]
+    v1 = verts[elems[:, 1]]
+    v2 = verts[elems[:, 2]]
+    lams = _triangle_barycentric_weights(points, v0, v1, v2)
+    h_el = _triangle_max_edge(v0, v1, v2)
+    cross = np.cross(v1 - v0, v2 - v0, axis=-1)
+    n_hat = cross / (np.linalg.norm(cross, axis=-1, keepdims=True) + 1e-300)
+    delta = points[:, np.newaxis, :] - v0[np.newaxis, :, :]
+    d = np.abs(np.sum(delta * n_hat[np.newaxis, :, :], axis=-1))
+    plane_tol = float(tol_scale) * h_el
+    lam_tol = 1e-9
+    inside = (d <= plane_tol[np.newaxis, :]) & np.all(lams >= -lam_tol, axis=-1)
+    elem_idx = np.full(points.shape[0], -1, dtype=np.int32)
+    lam_out = np.zeros((points.shape[0], 3), dtype=_F64)
+    offending: list[tuple[float, ...]] = []
+    for i in range(points.shape[0]):
+        matches = np.flatnonzero(inside[i])
+        if matches.size == 0:
+            offending.append(tuple(points[i].tolist()))
+            continue
+        e = int(matches[np.argmin(d[i, matches])])
+        elem_idx[i] = e
+        lam_out[i] = lams[i, e]
+    if offending:
+        raise ValueError(
+            "point(s) not on the surface mesh (plane distance / barycentric tolerance): "
+            f"{offending}"
+        )
+    return elem_idx, lam_out
+
+
+def p1_interpolate_at(
+    space: object,
+    grid: object,
+    coefficients: np.ndarray,
+    points: np.ndarray,
+) -> np.ndarray:
+    """Evaluate a P1 GridFunction at surface points via barycentric interpolation."""
+    pts = np.asarray(points, dtype=_F64)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError("points must have shape (N, 3)")
+    coeffs = np.asarray(coefficients, dtype=_C128).ravel()
+    elem_idx, lams = _locate_points_on_surface_mesh(pts, grid)
+    l2g = np.asarray(space.local2global, dtype=np.int32)[elem_idx]
+    mult = np.asarray(space.local_multipliers, dtype=_F64)[elem_idx]
+    dof_vals = coeffs[l2g]
+    weights = lams * mult
+    return np.sum(weights * dof_vals, axis=-1)
+
+
 def _estimate_dense_gb(n_dofs: int) -> float:
     return (n_dofs**2 * 16) / 1e9
 
 
-def _subdivide_axis(edges: Sequence[float], h_target: float) -> np.ndarray:
-    """Sorted 1-D nodes with every interval length ≤ *h_target*."""
+def _subdivide_axis(
+    edges: Sequence[float],
+    h_target: float,
+    *,
+    h_cap: float | None = None,
+    cap_lo: float | None = None,
+    cap_hi: float | None = None,
+) -> np.ndarray:
+    """Sorted 1-D nodes; interval length ≤ *h_target* (or ≤ min(*h_target*, *h_cap*) in [cap_lo, cap_hi])."""
     h_target = float(h_target)
     uniq = sorted(set(float(x) for x in edges))
     if len(uniq) < 2:
@@ -137,7 +252,16 @@ def _subdivide_axis(edges: Sequence[float], h_target: float) -> np.ndarray:
         length = b - a
         if length <= 0.0:
             continue
-        n_seg = max(1, int(math.ceil(length / h_target)))
+        h_eff = h_target
+        if (
+            h_cap is not None
+            and cap_lo is not None
+            and cap_hi is not None
+            and a >= float(cap_lo) - 1e-15
+            and b <= float(cap_hi) + 1e-15
+        ):
+            h_eff = min(h_target, float(h_cap))
+        n_seg = max(1, int(math.ceil(length / h_eff)))
         for s in range(1, n_seg):
             out.append(a + length * s / n_seg)
         out.append(b)
@@ -151,6 +275,8 @@ def box_mesh(
     rad_rect: tuple[float, float],
     origin: tuple[float, float, float],
     h_target: float,
+    *,
+    h_rad: float | None = None,
 ) -> bempp.Grid:
     """Structured triangle mesh of a closed box surface (outward normals).
 
@@ -168,9 +294,16 @@ def box_mesh(
     z0, z1 = oz, oz + D
     rx0, rx1 = -0.5 * rw, 0.5 * rw
     ry0, ry1 = -0.5 * rh, 0.5 * rh
+    if h_rad is None:
+        h_rad = min(rw, rh) / 8.0
+    h_rad = float(h_rad)
 
-    xs = _subdivide_axis([x0, x1, rx0, rx1], h_target)
-    ys = _subdivide_axis([y0, y1, ry0, ry1], h_target)
+    xs = _subdivide_axis(
+        [x0, x1, rx0, rx1], h_target, h_cap=h_rad, cap_lo=rx0, cap_hi=rx1
+    )
+    ys = _subdivide_axis(
+        [y0, y1, ry0, ry1], h_target, h_cap=h_rad, cap_lo=ry0, cap_hi=ry1
+    )
     zs = _subdivide_axis([z0, z1], h_target)
 
     vertices: list[np.ndarray] = []
@@ -261,8 +394,31 @@ class NeumannBmResult:
         z_bem = num / (den * self.rho * self.c * self.vn_P0)
         return complex(to_plus_jwt(z_bem).item())
 
+    def radiator_mean_pressure(self) -> complex:
+        """Area-weighted mean radiator pressure (Pa), e^{+jωt} (element quadrature)."""
+        domain = self.grid.domain_indices.astype(int)
+        areas = self.grid.volumes.astype(float)
+        rad = domain == RADIATOR_TAG
+        if not np.any(rad):
+            raise RuntimeError("radiator_mean_pressure: no radiator elements")
+        p_el = self.p_gf.evaluate_on_element_centers().ravel()
+        num = np.sum(p_el[rad] * areas[rad])
+        den = np.sum(areas[rad])
+        return complex(to_plus_jwt(num / den).item())
+
+    def surface_pressure_at(self, points: np.ndarray) -> np.ndarray:
+        """Interpolate solved P1 boundary pressure at *points* (N,3) in e^{+jωt}."""
+        raw = p1_interpolate_at(
+            self.space_p, self.grid, self.p_gf.coefficients, points
+        )
+        return np.asarray(to_plus_jwt(raw), dtype=_C128)
+
     def field_at(self, points: np.ndarray) -> np.ndarray:
-        """Exterior pressure at *points* (N,3) via full single- plus double-layer potentials."""
+        """Exterior pressure at *points* (N,3) via D[p] − S[q] (outward normals).
+
+        *q* is ∂p/∂n in bempp's e^{−iωt} form (set in :func:`solve_neumann_bm`).
+        Do not use on the boundary; use :meth:`surface_pressure_at` there instead.
+        """
         pts = np.asarray(points, dtype=_F64)
         if pts.ndim != 2 or pts.shape[1] != 3:
             raise ValueError("points must have shape (N, 3)")
@@ -274,8 +430,17 @@ class NeumannBmResult:
         dlp_pot = bempp.operators.potential.helmholtz.double_layer(
             self.space_p, eval_pts, k
         )
-        p_ext = (slp_pot @ self.neumann_fun - dlp_pot @ self.p_gf).ravel()
+        p_ext = (dlp_pot @ self.p_gf - slp_pot @ self.neumann_fun).ravel()
         return np.asarray(to_plus_jwt(p_ext), dtype=_C128)
+
+    def transfer_at(self, points: np.ndarray, *, on_surface: bool) -> np.ndarray:
+        """Dimensionless transfer p/(ρ c v_n) (``vn_P0`` as in the Burton–Miller solve)."""
+        scale = self.rho * self.c * self.vn_P0
+        if on_surface:
+            p = self.surface_pressure_at(points)
+        else:
+            p = self.field_at(points)
+        return np.asarray(p / scale, dtype=_C128)
 
 
 def solve_neumann_bm(
@@ -315,6 +480,8 @@ def solve_neumann_bm(
     @bempp.complex_callable
     def neumann_callable(point, normal, domain_index, result):
         if pulsating_sphere or int(domain_index) == RADIATOR_TAG:
+            # Project (e^{+jωt}): ∂p/∂n = −jωρ v_n. bempp-cl (e^{−iωt}): ∂p/∂n = +iωρ v_n.
+            # Prescribe the latter; map solved fields to +jωt once via to_plus_jwt.
             result[0] = 1j * omega * rho * vn_P0
         else:
             result[0] = 0.0
@@ -398,3 +565,185 @@ def zrad_sphere_analytic(ka: float) -> complex:
     """Pulsating sphere z = j ka / (1 + j ka), e^{+jωt}, unit normal velocity."""
     jka = 1j * float(ka)
     return jka / (1.0 + jka)
+
+
+def pulsating_sphere_H_transfer(r_m: float, a: float, ka: float) -> complex:
+    """Transfer H = p/(ρ c v_n) on sphere axis, e^{+jωt}.
+
+    H(r) = z_rad(ka) (a/r) e^{−jk(r−a)} with k = ka/a.
+    """
+    r_m = float(r_m)
+    a = float(a)
+    ka = float(ka)
+    if r_m <= a:
+        raise ValueError("r must lie outside the sphere")
+    k = ka / a
+    z = zrad_sphere_analytic(ka)
+    return z * (a / r_m) * np.exp(-1j * k * (r_m - a))
+
+
+_DEFAULT_RAD_DIV = 8
+
+
+def c09_geometry_signature(
+    W: float,
+    H: float,
+    D: float,
+    rad_rect: tuple[float, float],
+    origin: tuple[float, float, float],
+    *,
+    h_max: float,
+    rho: float,
+    c: float,
+    rad_div: int = _DEFAULT_RAD_DIV,
+) -> dict[str, Any]:
+    """Stable dict for cache keys (geometry + fluid, not frequency)."""
+    sig: dict[str, Any] = {
+        "W": round(float(W), 12),
+        "H": round(float(H), 12),
+        "D": round(float(D), 12),
+        "rw": round(float(rad_rect[0]), 12),
+        "rh": round(float(rad_rect[1]), 12),
+        "ox": round(float(origin[0]), 12),
+        "oy": round(float(origin[1]), 12),
+        "oz": round(float(origin[2]), 12),
+        "h_max": round(float(h_max), 12),
+        "rho": round(float(rho), 12),
+        "c": round(float(c), 12),
+    }
+    if int(rad_div) != _DEFAULT_RAD_DIV:
+        sig["rad_div"] = int(rad_div)
+    return sig
+
+
+def c09_bem_cache_path(
+    cache_dir: Path,
+    geo: dict[str, Any],
+    *,
+    epw: float,
+    f_hz: float,
+) -> Path:
+    payload = {
+        **geo,
+        "cache_version": _BEM_CACHE_VERSION,
+        "epw": float(epw),
+        "f_hz": round(float(f_hz), 8),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    return cache_dir / f"c09_{digest}.npz"
+
+
+_BEM_CACHE_VERSION = 5
+
+
+def save_c09_bem_cache(
+    path: Path,
+    *,
+    f_hz: float,
+    epw: float,
+    h_m: float,
+    n_dof: int,
+    p1_coefficients: np.ndarray,
+    z_rad: complex | None = None,
+    surface_names: Sequence[str] | None = None,
+    surface_p: Sequence[complex] | None = None,
+    g2_planes: Sequence[str] | None = None,
+    g2_theta: np.ndarray | None = None,
+    g2_p_by_plane: dict[str, np.ndarray] | None = None,
+    post_complete: bool = False,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    p1 = np.asarray(p1_coefficients, dtype=_C128).ravel()
+    arrays: dict[str, Any] = {
+        "version": _BEM_CACHE_VERSION,
+        "f_hz": float(f_hz),
+        "epw": float(epw),
+        "h_m": float(h_m),
+        "n_dof": int(n_dof),
+        "post_complete": bool(post_complete),
+        "p1_coeff_real": np.real(p1).astype(_F64),
+        "p1_coeff_imag": np.imag(p1).astype(_F64),
+    }
+    if z_rad is not None:
+        arrays["z_real"] = float(z_rad.real)
+        arrays["z_imag"] = float(z_rad.imag)
+    if surface_names is not None and surface_p is not None:
+        arrays["surface_names"] = np.asarray(list(surface_names), dtype=object)
+        arrays["surface_p_real"] = np.asarray(
+            [float(np.real(p)) for p in surface_p], dtype=_F64
+        )
+        arrays["surface_p_imag"] = np.asarray(
+            [float(np.imag(p)) for p in surface_p], dtype=_F64
+        )
+    if g2_planes is not None and g2_theta is not None and g2_p_by_plane is not None:
+        arrays["g2_planes"] = np.asarray(list(g2_planes), dtype=object)
+        arrays["g2_theta"] = np.asarray(g2_theta, dtype=_F64)
+        for plane in g2_planes:
+            p_row = np.asarray(g2_p_by_plane[plane], dtype=_C128).ravel()
+            arrays[f"g2_p_{plane}_real"] = np.real(p_row).astype(_F64)
+            arrays[f"g2_p_{plane}_imag"] = np.imag(p_row).astype(_F64)
+    if path.is_file():
+        with np.load(path, allow_pickle=True) as prior:
+            for key in prior.files:
+                if key not in arrays:
+                    arrays[key] = prior[key]
+    np.savez_compressed(path, **arrays)
+
+
+def load_c09_bem_cache(path: Path) -> dict[str, Any]:
+    with np.load(path, allow_pickle=True) as zf:
+        version = int(zf["version"])
+        if version not in (1, 2, 3, 4, _BEM_CACHE_VERSION):
+            raise ValueError(f"BEM cache version mismatch in {path}")
+        if version < _BEM_CACHE_VERSION:
+            raise ValueError(
+                f"BEM cache v{version} stale (need v{_BEM_CACHE_VERSION}); delete {path}"
+            )
+        out: dict[str, Any] = {
+            "f_hz": float(zf["f_hz"]),
+            "epw": float(zf["epw"]),
+            "h_m": float(zf["h_m"]),
+            "n_dof": int(zf["n_dof"]),
+            "post_complete": bool(zf["post_complete"]) if "post_complete" in zf else True,
+        }
+        if "p1_coeff_real" in zf:
+            out["p1_coefficients"] = (
+                np.asarray(zf["p1_coeff_real"], dtype=_F64)
+                + 1j * np.asarray(zf["p1_coeff_imag"], dtype=_F64)
+            )
+        else:
+            out["p1_coefficients"] = None
+        if "z_real" in zf:
+            out["z_rad"] = complex(float(zf["z_real"]), float(zf["z_imag"]))
+        elif out["post_complete"]:
+            raise ValueError(f"BEM cache missing z_rad in {path}")
+        else:
+            out["z_rad"] = None
+        if "surface_names" in zf:
+            out["surface_names"] = [str(x) for x in zf["surface_names"].tolist()]
+        else:
+            out["surface_names"] = []
+        out["surface_p"] = (
+            [
+                complex(r, i)
+                for r, i in zip(
+                    zf["surface_p_real"], zf["surface_p_imag"], strict=True
+                )
+            ]
+            if "surface_p_real" in zf
+            else []
+        )
+        if "g2_planes" in zf:
+            planes = [str(p) for p in zf["g2_planes"].tolist()]
+            theta = np.asarray(zf["g2_theta"], dtype=_F64)
+            p_by: dict[str, np.ndarray] = {}
+            for plane in planes:
+                re = np.asarray(zf[f"g2_p_{plane}_real"], dtype=_F64)
+                im = np.asarray(zf[f"g2_p_{plane}_imag"], dtype=_F64)
+                p_by[plane] = re + 1j * im
+            out["g2_planes"] = planes
+            out["g2_theta"] = theta
+            out["g2_p_by_plane"] = p_by
+        return out

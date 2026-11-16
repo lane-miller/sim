@@ -33,11 +33,10 @@ from fdtd.post.kirchhoff import (  # noqa: E402
     kh_pressure_loop,
 )
 from fdtd.post.reference import z_baffled_circle  # noqa: E402
-from fdtd.post.spectra import spectrum, spectrum_rows  # noqa: E402
+from fdtd.post.spectra import spectrum  # noqa: E402
 from fdtd.post.zrad import causal_end_taper, zrad_from_h5  # noqa: E402
-from fdtd.recorder import resolve_huygens_offset  # noqa: E402
 from fdtd.run import run  # noqa: E402
-from fdtd.source import BoxBoundary, velocity_pulse  # noqa: E402
+from fdtd.source import BoxBoundary  # noqa: E402
 import validation._common as vc  # noqa: E402
 
 _G1_PPW = (10, 15, 20, 30)
@@ -273,34 +272,6 @@ def _g2_h_from_n(box: object, n_cells: int) -> float:
     return L / float(n_cells)
 
 
-def _h_transfer_err(h_ref: complex, h: complex) -> tuple[float, float]:
-    db = 20.0 * math.log10(abs(h) / max(abs(h_ref), 1e-30))
-    ph = float(np.rad2deg(np.angle(h) - np.angle(h_ref)))
-    while ph > 180.0:
-        ph -= 360.0
-    while ph < -180.0:
-        ph += 360.0
-    return db, ph
-
-
-def _probe_targets_g3(cfg: Config, grid: Grid, derived: object) -> list[tuple[float, float, float]]:
-    offset = resolve_huygens_offset(cfg)
-    gap = int(derived.gap_cells)  # type: ignore[attr-defined]
-    g_cells = 0.5 * (offset + gap)
-    g = g_cells * grid.h
-    W, D = grid.realized_W, grid.realized_D
-    nominal = [
-        (0.0, 0.0, g),
-        (0.5 * W + g, 0.0, -0.5 * D),
-        (0.0, 0.0, -D - g),
-    ]
-    snapped: list[tuple[float, float, float]] = []
-    for x, y, z in nominal:
-        i, j, k = grid.index_of(x, y, z)
-        snapped.append(grid.coords_of(i, j, k))
-    return snapped
-
-
 def _plan_resources(cfgs: list[Config], ram_limit: float) -> tuple[float, float]:
     peak = 0.0
     wall = 0.0
@@ -312,40 +283,6 @@ def _plan_resources(cfgs: list[Config], ram_limit: float) -> tuple[float, float]
             raise vc.RamLimitExceeded("c08 plan", d.nx, float(est), float(ram_limit))
         wall += d.n_steps * d.total_cells / _C1_UPDATES_PER_S
     return wall, peak
-
-
-def _load_huygens_spectra(
-    path: Path,
-    cfg: Config,
-    d: object,
-    f_hz: float,
-) -> tuple[SurfacePatches, complex, np.ndarray, np.ndarray, float]:
-    import h5py
-
-    rho = cfg.air.rho
-    with h5py.File(path, "r") as f:
-        centers = np.asarray(f["huygens/centers"][()], dtype=np.float64)
-        normals = np.asarray(f["huygens/normals"][()], dtype=np.float64)
-        areas = np.asarray(f["huygens/areas"][()], dtype=np.float64)
-        patches = SurfacePatches(centers, normals, areas, float(d.h))  # type: ignore[attr-defined]
-        t_p = np.asarray(f["huygens/times_p"][()], dtype=np.float64)
-        t_v = np.asarray(f["huygens/times_vn"][()], dtype=np.float64)
-        p_ts = np.asarray(f["huygens/p_face"][()], dtype=np.float64)
-        vn_ts = np.asarray(f["huygens/vn"][()], dtype=np.float64)
-        t_rad = np.asarray(f["radiator/times_p"][()], dtype=np.float64)
-        v_rad = np.array(
-            [velocity_pulse(float(t), d.pulse_sigma, d.pulse_t0) for t in t_rad],  # type: ignore[attr-defined]
-            dtype=np.float64,
-        )
-    n_samp = p_ts.shape[0]
-    win = causal_end_taper(n_samp)
-    p_win = p_ts * win[:, np.newaxis]
-    vn_win = vn_ts * win[:, np.newaxis]
-    with vc.timed_section(f"huygens spectrum f={f_hz:.1f} Hz"):
-        V = complex(spectrum(v_rad, t_rad, f_hz))
-        p_face = np.asarray(spectrum_rows(p_win, t_p, f_hz), dtype=np.complex128)
-        vn_face = np.asarray(spectrum_rows(vn_win, t_v, f_hz), dtype=np.complex128)
-    return patches, V, p_face, vn_face, rho
 
 
 def _directivity_cut(
@@ -468,7 +405,7 @@ def _c08_body(args: argparse.Namespace) -> int:
         c.numerics.h_override = _g2_h_from_n(c.box, n_cells)
         if n_cells == _G2_GATE_N:
             d_plan = derive(c)
-            targets = _probe_targets_g3(c, Grid(c, d_plan), d_plan)
+            targets = vc.box_mode_probe_targets(c, Grid(c, d_plan), d_plan)
             c.output.probes = [[x, y, z] for x, y, z in targets]
         plan_cfgs.append(c)
 
@@ -608,7 +545,7 @@ def _c08_body(args: argparse.Namespace) -> int:
                 d_probe = derive(cfg)
                 grid_probe = Grid(cfg, d_probe)
                 cfg.output.probes = [
-                    list(x) for x in _probe_targets_g3(cfg, grid_probe, d_probe)
+                    list(x) for x in vc.box_mode_probe_targets(cfg, grid_probe, d_probe)
                 ]
             h5 = tmp / f"g2_N{n_cells}.h5"
             label = f"g2_N{n_cells}"
@@ -666,9 +603,10 @@ def _c08_body(args: argparse.Namespace) -> int:
             dir_by_n: dict[str, dict[int, tuple[np.ndarray, np.ndarray]]] = {}
             H_by_n: dict[str, dict[int, np.ndarray]] = {}
             for n_cells in _G2_N:
-                patches, V, p_face, vn_face, rho = _load_huygens_spectra(
-                    g2_paths[n_cells], cfg_g2_base, g2_derived[n_cells], f_hz
+                patches, V, p_face, vn_face = vc.load_huygens_spectra(
+                    g2_paths[n_cells], g2_derived[n_cells], f_hz
                 )
+                rho = cfg_g2_base.air.rho
                 for plane in ("xz", "yz"):
                     theta, db, H = _directivity_cut(
                         plane=plane,
@@ -763,7 +701,7 @@ def _c08_body(args: argparse.Namespace) -> int:
         d_g3 = g2_derived[_G2_GATE_N]
         h5_g3 = g2_paths[_G2_GATE_N]
         grid_g3 = Grid(cfg_g3, d_g3)  # type: ignore[arg-type]
-        probe_req = _probe_targets_g3(cfg_g3, grid_g3, d_g3)
+        probe_req = vc.box_mode_probe_targets(cfg_g3, grid_g3, d_g3)
         probe_names = ("front+z", "+x mid", "rear−z")
         g3_rows: list[dict[str, Any]] = []
         rho = cfg_g3.air.rho
@@ -785,10 +723,7 @@ def _c08_body(args: argparse.Namespace) -> int:
                     f"G3 kL={kl:g} → f={f_hz:.2f} Hz outside design band "
                     f"[{g3_f_min}, {g3_f_max}]"
                 )
-            patches, V, p_face, vn_face, rho_h5 = _load_huygens_spectra(
-                h5_g3, cfg_g3, d_g3, f_hz
-            )
-            assert abs(rho_h5 - rho) < 1e-9
+            patches, V, p_face, vn_face = vc.load_huygens_spectra(h5_g3, d_g3, f_hz)
             omega = np.asarray([2.0 * math.pi * f_hz], dtype=np.float64)
             k_sel = np.asarray([2.0 * math.pi * f_hz / c], dtype=np.float64)
             dpdn = dpdn_from_vn(vn_face[np.newaxis, :], omega, rho)
@@ -805,7 +740,7 @@ def _c08_body(args: argparse.Namespace) -> int:
                         k_sel,
                     )[0, 0]
                 H_kh = p_kh / V
-                db, ph = _h_transfer_err(H_fd, H_kh)
+                db, ph = vc.h_transfer_err(H_fd, H_kh)
                 ok = abs(db) <= _G3_DB and abs(ph) <= _G3_PHASE_DEG
                 g3_pass = g3_pass and ok
                 row = {
