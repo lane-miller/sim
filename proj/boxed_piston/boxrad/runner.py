@@ -26,6 +26,7 @@ from boxrad.config import (
     Derived,
     derive,
     estimate_memory_bytes,
+    format_realized_box_dims,
     validate,
 )
 from boxrad.cpml import make_cpml_state
@@ -201,6 +202,8 @@ def _dry_run_summary(cfg: Config, derived: Derived) -> dict[str, Any]:
         "zrad_source": "analytic_baffled" if derived.zrad_fallback else "fdtd",
         "geometry": cfg.geometry,
     }
+    if cfg.geometry == "box" and cfg.box is not None:
+        summary["box_dims"] = format_realized_box_dims(cfg, derived)
     return summary
 
 

@@ -13,7 +13,7 @@ import numpy as np
 from matplotlib import ticker
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from boxrad.config import Config, derive
+from boxrad.config import Config, derive, format_realized_box_dims
 from boxrad.grid import Grid, radiator_area_exact, radiator_outline_loops, _radiator_face_weights
 from boxrad.post.kirchhoff import huygens_box_patches, huygens_open_patches
 from boxrad.recorder import resolve_huygens_offset
@@ -22,6 +22,52 @@ _ORIGIN_NOTE = "origin = radiator center, +z radiating"
 _MESH_LINE_CAP = 200
 _WEIGHT_EPS = 1e-6
 _TITLE_WRAP = 50
+_LIMIT_MARGIN_FRAC = 0.05
+
+
+class _Bounds3D:
+    def __init__(self) -> None:
+        self.xmin = math.inf
+        self.xmax = -math.inf
+        self.ymin = math.inf
+        self.ymax = -math.inf
+        self.zmin = math.inf
+        self.zmax = -math.inf
+
+    def include(self, x: float, y: float, z: float) -> None:
+        self.xmin = min(self.xmin, float(x))
+        self.xmax = max(self.xmax, float(x))
+        self.ymin = min(self.ymin, float(y))
+        self.ymax = max(self.ymax, float(y))
+        self.zmin = min(self.zmin, float(z))
+        self.zmax = max(self.zmax, float(z))
+
+    def include_arrays(
+        self,
+        xs: np.ndarray,
+        ys: np.ndarray,
+        zs: np.ndarray,
+    ) -> None:
+        for x, y, z in zip(xs.ravel(), ys.ravel(), zs.ravel(), strict=True):
+            self.include(float(x), float(y), float(z))
+
+    def limits(self, *, margin_frac: float = _LIMIT_MARGIN_FRAC) -> tuple[float, float, float]:
+        def _lim(lo: float, hi: float) -> tuple[float, float]:
+            if not math.isfinite(lo) or not math.isfinite(hi):
+                return -0.05, 0.05
+            if hi < lo:
+                lo, hi = hi, lo
+            span = hi - lo
+            if span < 1e-15:
+                pad = max(abs(lo), abs(hi), 0.05) * margin_frac
+                return lo - pad, hi + pad
+            pad = span * margin_frac
+            return lo - pad, hi + pad
+
+        xlo, xhi = _lim(self.xmin, self.xmax)
+        ylo, yhi = _lim(self.ymin, self.ymax)
+        zlo, zhi = _lim(self.zmin, self.zmax)
+        return (xlo, xhi), (ylo, yhi), (zlo, zhi)
 
 
 def _load_source(source: Config | str | Path | Any) -> tuple[Config, object]:
@@ -149,6 +195,7 @@ def plot_face_mesh(
     *,
     show: bool = True,
     out: str | Path | None = None,
+    colorbar_pad: float | None = None,
     **mesh_kwargs: Any,
 ) -> plt.Figure:
     """Discretized front-face radiator weights with Yee cell grid."""
@@ -195,7 +242,10 @@ def plot_face_mesh(
         zorder=2,
         **mesh_kwargs,
     )
-    fig.colorbar(mesh, ax=ax, shrink=0.8, label="radiator weight")
+    cbar_kw: dict[str, Any] = {"shrink": 0.8, "label": "radiator weight"}
+    if colorbar_pad is not None:
+        cbar_kw["pad"] = colorbar_pad
+    fig.colorbar(mesh, ax=ax, **cbar_kw)
 
     stride = _draw_yee_mesh(ax, x_e, y_e)
     stride_note = f"; grid stride {stride}" if stride > 1 else ""
@@ -281,12 +331,17 @@ def plot_geometry(
     f_min, f_max = cfg.band.f_min, float(derived.f_max)
     x0, x1, y0, y1, z_front = _face_bounds(grid)
 
-    fig = plt.figure(figsize=(13, 6))
-    ax3 = fig.add_subplot(1, 2, 1, projection="3d")
-    ax2 = fig.add_subplot(1, 2, 2)
+    fig = plt.figure(figsize=(13, 6), layout="constrained")
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.1, 1.0])
+    ax3 = fig.add_subplot(gs[0, 0], projection="3d")
+    ax_face = fig.add_subplot(gs[0, 1])
+    bounds = _Bounds3D()
 
     if cfg.geometry == "box":
         verts, (xb0, xb1, yb0, yb1, zb0, zb1) = _box_3d_verts(grid)
+        for corners in verts:
+            for x_a, y_a, z_a in corners:
+                bounds.include(x_a, y_a, z_a)
         box_mesh = Poly3DCollection(verts, alpha=0.12, facecolor="steelblue", edgecolor="k")
         ax3.add_collection3d(box_mesh)
         edges = [
@@ -307,6 +362,8 @@ def plot_geometry(
             ax3.plot([x_a, x_b], [y_a, y_b], [z_a, z_b], "k-", lw=0.8, alpha=0.5)
         span_x, span_y, span_z = xb1 - xb0, yb1 - yb0, zb1 - zb0
     else:
+        for x_a, y_a in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+            bounds.include(x_a, y_a, 0.0)
         xx, yy = np.meshgrid([x0, x1], [y0, y1], indexing="xy")
         zz = np.zeros_like(xx)
         ax3.plot_surface(xx, yy, zz, alpha=0.15, color="gray")
@@ -322,6 +379,7 @@ def plot_geometry(
             hy = huygens_open_patches(W, H, depth, h, origin_hy, offset_cells=off)
         else:
             hy = huygens_box_patches(W, H, D, h, origin_hy, offset_cells=off)
+        bounds.include_arrays(hy.centers[:, 0], hy.centers[:, 1], hy.centers[:, 2])
         ax3.scatter(
             hy.centers[:, 0],
             hy.centers[:, 1],
@@ -334,14 +392,18 @@ def plot_geometry(
 
     if show_probes and cfg.output.probes:
         for row in cfg.output.probes:
+            bounds.include(row[0], row[1], row[2])
             ax3.scatter([row[0]], [row[1]], [row[2]], c="magenta", s=30)
 
     outlines = _radiator_outline_xy(cfg)
     for loop in outlines:
+        bounds.include_arrays(loop[:, 0], loop[:, 1], np.full(loop.shape[0], z_front))
         ax3.plot(loop[:, 0], loop[:, 1], np.full(loop.shape[0], z_front), "r-", lw=2)
 
+    bounds.include(0.0, 0.0, z_front)
     ax3.scatter([0.0], [0.0], [z_front], c="k", s=24)
     arrow_len = 0.15 * max(span_x, span_y, span_z, 0.05)
+    bounds.include(0.0, 0.0, z_front + arrow_len)
     ax3.quiver(
         0.0,
         0.0,
@@ -352,23 +414,31 @@ def plot_geometry(
         color="green",
         arrow_length_ratio=0.2,
     )
+    (xlim, ylim, zlim) = bounds.limits()
+    ax3.set_xlim(xlim)
+    ax3.set_ylim(ylim)
+    ax3.set_zlim(zlim)
+    dx = xlim[1] - xlim[0]
+    dy = ylim[1] - ylim[0]
+    dz = zlim[1] - zlim[0]
     ax3.set_xlabel("x [m]", labelpad=8)
     ax3.set_ylabel("y [m]", labelpad=8)
     ax3.set_zlabel("z [m]", labelpad=8)
     for axis in (ax3.xaxis, ax3.yaxis, ax3.zaxis):
         axis.set_major_locator(ticker.MaxNLocator(4))
-    ax3.set_box_aspect((span_x + 0.04, span_y + 0.04, max(span_z, 0.04) + 0.04))
+    ax3.set_box_aspect((dx, dy, dz))
 
-    plot_face_mesh(source, ax=ax2, show=False)
+    plot_face_mesh(source, ax=ax_face, show=False, colorbar_pad=0.02)
 
     rad = cfg.radiator
     dim_s = "×".join(f"{x:.4g}" for x in rad.dims)
+    box_line = format_realized_box_dims(cfg, derived)
     title = (
-        f"box {W:.4g}×{H:.4g}×{D:.4g} m; "
+        f"{box_line}; "
         f"radiator {rad.shape} {dim_s} m @ ({rad.x_c:g},{rad.y_c:g}); "
         f"h={h*1e3:.3g} mm; band {f_min:g}–{f_max:g} Hz; {_ORIGIN_NOTE}"
     )
-    fig.suptitle(title)
+    fig.suptitle(_wrap_title(title, width=72))
 
     if out is not None:
         fig.savefig(out, dpi=150, bbox_inches="tight")

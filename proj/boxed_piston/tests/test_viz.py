@@ -11,6 +11,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from boxrad.config import Config, derive
 from boxrad.grid import Grid
 from boxrad.viz import (
+    _box_3d_verts,
     _face_bounds,
     _face_weight_plane,
     _outline_centroid_xy,
@@ -115,3 +116,36 @@ def test_demo_configs_geometry_plot(cfg_name: str) -> None:
     fig = plot_geometry(path, show=False)
     assert len(_plot_axes(fig)) == 2
     _assert_weight_centroid_matches_outline(cfg)
+
+
+def test_plot_geometry_coarse_circle_3d_axis_limits() -> None:
+    path = _DEMO_CONFIGS / "demo_coarse_circle.json"
+    cfg = Config.from_json(path.read_text(encoding="utf-8"))
+    derived = derive(cfg)
+    grid = Grid(cfg, derived)
+    _, (xb0, xb1, yb0, yb1, zb0, zb1) = _box_3d_verts(grid)
+    _, _, _, _, z_front = _face_bounds(grid)
+    dx_box = xb1 - xb0
+    dy_box = yb1 - yb0
+    dz_box = zb1 - zb0
+    span_x, span_y, span_z = dx_box, dy_box, dz_box
+    arrow_len = 0.15 * max(span_x, span_y, span_z, 0.05)
+    dz_content = (z_front + arrow_len) - zb0
+
+    fig = plot_geometry(path, show=False)
+    ax3 = next(a for a in _plot_axes(fig) if isinstance(a, Axes3D))
+    x_span = ax3.get_xlim()[1] - ax3.get_xlim()[0]
+    y_span = ax3.get_ylim()[1] - ax3.get_ylim()[0]
+    z_span = ax3.get_zlim()[1] - ax3.get_zlim()[0]
+    assert x_span <= dx_box * 1.10 + 1e-9
+    assert y_span <= dy_box * 1.10 + 1e-9
+    assert z_span <= dz_content * 1.10 + 1e-9
+    assert "snapped" not in (fig.get_suptitle() or "")
+
+
+def test_snap_note_racetrack() -> None:
+    path = _DEMO_CONFIGS / "demo_racetrack_box.json"
+    fig = plot_geometry(path, show=False)
+    title = fig.get_suptitle() or ""
+    assert "snapped to h" in title
+    assert "requested 0.25×0.18×0.2" in title

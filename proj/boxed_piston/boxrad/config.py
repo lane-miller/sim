@@ -176,6 +176,30 @@ def _radiator_half_extents(radiator: Radiator) -> tuple[float, float]:
     raise ValueError(f"unknown radiator shape: {radiator.shape!r}")
 
 
+def format_realized_box_dims(
+    cfg: Config,
+    derived: Derived,
+    *,
+    abs_tol: float = 1e-9,
+) -> str:
+    """Human-readable realized box size, noting config dims when snapped to *h*."""
+    w, h, d = derived.realized_W, derived.realized_H, derived.realized_D
+    if cfg.geometry != "box" or cfg.box is None:
+        return f"box {w:.4g}×{h:.4g}×{d:.4g} m"
+    req = cfg.box
+    snapped = (
+        abs(w - req.W) > abs_tol
+        or abs(h - req.H) > abs_tol
+        or abs(d - req.D) > abs_tol
+    )
+    if not snapped:
+        return f"box {w:.4g}×{h:.4g}×{d:.4g} m"
+    return (
+        f"box {w:.4g}×{h:.4g}×{d:.4g} m "
+        f"(requested {req.W:.4g}×{req.H:.4g}×{req.D:.4g}, snapped to h)"
+    )
+
+
 def _baffle_domain_counts(
     radiator: Radiator, h: float, gap_cells: int, cpml_cells: int
 ) -> tuple[int, int, int, int, int, int, float, float, float]:
