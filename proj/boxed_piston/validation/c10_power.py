@@ -45,9 +45,10 @@ _N_PHI_FINE = 72
 _G_WH_TOL = 0.02
 _G_WFF_TOL = 0.02
 _G1_WH_NOTE = (
-    "direct Huygens flux ½Re Σ p v_n* carries an O((ωΔt)², (kh)²) "
-    "discrete-product error near f_max (≈1% at ~23 ppw; ≤0.3% for kL ≤ 10); "
-    "far-field power is the primary energy check."
+    "Direct Huygens flux ½Re Σ p v_n* carries an O((kh)²) discrete-product error: "
+    "≈0.5 % at f_max at ~23 ppw (C10), ≈0.03 % at ~71 ppw (C11). The 1.04 % reported "
+    "before 0.2.0 included decimation aliasing, fixed by alias-aware decimation. "
+    "Far-field power (primary check) ≤ 0.43 %."
 )
 _C1_UPDATES_PER_S = 375.0e6
 _V_REF = 1.0  # m/s transfer normalization

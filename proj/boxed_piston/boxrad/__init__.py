@@ -4,7 +4,7 @@ Derives the grid, time step, CPML, and run length from JSON config; writes chunk
 with Huygens-surface data for post-processed Z_rad and Kirchhoff–Helmholtz far field.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from boxrad.config import Config
 from boxrad.result import Result

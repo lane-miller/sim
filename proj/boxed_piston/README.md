@@ -70,7 +70,7 @@ For a fuller script (plots of $z$, SPL, and polar patterns), see
   conventions, warnings, and limits.
 - [acs-lpm integration](docs/acs_lpm.md): using a boxrad run as the radiation
   load and radiation model in lumped-parameter circuits.
-- [Validation](docs/validation.md): checks C1–C10, with their references,
+- [Validation](docs/validation.md): checks C1–C11, with their references,
   gates, and results, and how to rerun them.
 - [Developer brief](docs/brief.md): the design spec and method details.
 
@@ -80,7 +80,21 @@ For a fuller script (plots of $z$, SPL, and polar patterns), see
 |---|---|
 | `boxrad/` | Installable package (solver, recorder, post-processing, `Result`, CLIs) |
 | `configs/` | `default.json` (quickstart example), validation configs (`c05_*` … `c09_*`), and demos (`configs/demo/`) |
-| `validation/` | Check scripts C1–C10 (not part of the wheel); results in `validation/results/` |
+| `validation/` | Check scripts C1–C11 (not part of the wheel); results in `validation/results/` |
 | `tests/` | pytest unit tests (`-m "not slow"` for the fast set) |
 | `examples/` | `quickstart.py` |
 | `outputs/` | Default HDF5 destination (created on first run) |
+
+## Changelog
+
+### 0.2.0
+
+- **Huygens decimation:** `derive` picks decimation $M$ from the analytic pulse
+  spectrum and `numerics.alias_rejection_db` (default 100 dB) so alias partners
+  at band edge stay below the limit. Fixes band-edge excess in far-field power
+  and Huygens flux vs circuit power (C11).
+- **Metadata:** `derived_json` includes `decimation_m` and `alias_level_db`;
+  `/meta/accuracy` records `alias_level_db`.
+- **Compatibility:** older `.h5` files still load, but **regenerate files made
+  with 0.1.x** if you rely on `field`, `surface_p`, or `directivity` near
+  $f_\mathrm{max}$ (see [acs-lpm integration](docs/acs_lpm.md)).

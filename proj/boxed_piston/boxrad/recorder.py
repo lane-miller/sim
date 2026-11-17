@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from boxrad.config import Config, Derived
+from boxrad.config import Config, Derived, decimation_m_cap
 from boxrad.grid import Fields, Grid
 from boxrad.post.kirchhoff import (
     box_surface_patches,
@@ -35,15 +35,22 @@ _F32 = np.float32
 _BUFFER_SAMPLES = 256
 _CONVENTIONS = "e^{+jωt}; p at integer steps, v at half steps"
 _PULSE_BANDLIMIT_NOTE = (
-    "Pulse band-limits content (−40 dB at 1.2·f_max); decimation at 2.5·f_max is lossless in band"
+    "Huygens decimation m from alias rejection vs analytic pulse spectrum (see derived_json)"
 )
 _DEFAULT_HUYGENS_OFFSET_CELLS = 3
 _STENCIL_W4 = np.array([-1.0, 9.0, 9.0, -1.0], dtype=_F64) / 16.0
 
 
 def decimation_factor(f_max: float, dt: float) -> int:
-    """M = floor(1 / (2.5·f_max·Δt)), at least 1."""
-    return max(1, int(math.floor(1.0 / (2.5 * float(f_max) * float(dt)))))
+    """Legacy cap ``floor(1/(2.5·f_max·Δt))`` (tests / upper bound only)."""
+    return decimation_m_cap(f_max, dt)
+
+
+def resolve_decimation_factor(cfg: Config, derived: Derived) -> int:
+    """Recorder decimation ``M`` from :func:`~boxrad.config.derive` (override wins)."""
+    if cfg.numerics.decimation_override is not None:
+        return max(1, int(cfg.numerics.decimation_override))
+    return int(derived.decimation_m)
 
 
 def resolve_huygens_offset(cfg: Config) -> int:
@@ -401,7 +408,7 @@ class Recorder:
         self.rho = float(cfg.air.rho)
         self.sigma = float(derived.pulse_sigma)
         self.t0 = float(derived.pulse_t0)
-        self.decim = decimation_factor(derived.f_max, derived.dt)
+        self.decim = resolve_decimation_factor(cfg, derived)
         self._offset = offset
         self._zrad_source = "fdtd"
 

@@ -27,6 +27,11 @@ validity limits, see the [user guide](user_guide.md).
 4. In acs-lpm, open the file with `boxrad.Result`, evaluate on the MNA
    frequency grid, and cache the arrays (see the sketch below).
 
+**Version 0.2.0:** Huygens recording uses alias-aware decimation. HDF5 files
+written with **0.1.x** remain readable, but `Result.field`, `Result.surface_p`,
+and `Result.directivity` near $f_\mathrm{max}$ can carry decimation alias bias.
+**Regenerate** enclosure `.h5` files with boxrad 0.2.0 or newer after upgrading.
+
 Set the boxrad radiator to the driver's effective radiating area. boxrad
 uses the discretized area `Result.S_grid` ($h^2\sum w$) in every conversion.
 It is printed by `boxrad-info` and plotted by `boxrad-plot --face` (title
@@ -192,6 +197,7 @@ conditions listed:
 | `Result.accuracy["ppw_realized"]` | Points per wavelength at $f_\mathrm{max}$ | Warn if < 20 |
 | `Result.accuracy["cells_across_radiator"]` | Radiator resolution | Warn if < 10; raise it if Im z fits are sensitive |
 | `Result.accuracy["h"]` | Grid spacing [m] | — |
+| `Result.accuracy["alias_level_db"]` | Huygens decimation alias level [dB re $\|S(f_\mathrm{max})\|$] (0.2.0+) | Warn if above `−alias_rejection_db` |
 | `Result.meta["tail_db"]` | Record decay [dB re peak] | Warn if > −60 dB |
 | `Result.band` | Supported band | Enforced by `Result` (`ValueError` outside) |
 | `Result.meta["boxrad_version"]`, `["git_commit"]` | Provenance | Record |

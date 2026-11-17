@@ -37,7 +37,12 @@ from boxrad.post.kirchhoff import (
     huygens_box_patches,
     huygens_open_patches,
 )
-from boxrad.recorder import Recorder, decimation_factor, resolve_huygens_offset
+from boxrad.recorder import (
+    Recorder,
+    decimation_factor,
+    resolve_decimation_factor,
+    resolve_huygens_offset,
+)
 from boxrad.source import BoxBoundary
 
 try:
@@ -103,7 +108,7 @@ def _cells_across_radiator(cfg: Config, derived: Derived) -> float:
 
 def estimate_output_bytes(cfg: Config, derived: Derived) -> int:
     """Rough uncompressed payload (datasets only; excludes HDF5 overhead)."""
-    m = decimation_factor(derived.f_max, derived.dt)
+    m = resolve_decimation_factor(cfg, derived)
     n_full = derived.n_steps
     n_dec = (n_full + m - 1) // m if n_full else 0
     offset = resolve_huygens_offset(cfg)
@@ -184,7 +189,9 @@ def _print_warnings(warnings: list[str]) -> None:
 
 
 def _dry_run_summary(cfg: Config, derived: Derived) -> dict[str, Any]:
-    m = decimation_factor(derived.f_max, derived.dt)
+    m = resolve_decimation_factor(cfg, derived)
+    dt_dec = m * derived.dt
+    f_nyq = 0.5 / dt_dec if dt_dec > 0.0 else float("nan")
     mem = estimate_memory_bytes(derived.nx, derived.ny, derived.nz, derived.cpml_cells)
     summary: dict[str, Any] = {
         "grid_shape": (derived.nx, derived.ny, derived.nz),
@@ -197,6 +204,9 @@ def _dry_run_summary(cfg: Config, derived: Derived) -> dict[str, Any]:
         "cells_across_radiator": _cells_across_radiator(cfg, derived),
         "memory_bytes": mem,
         "decimation_m": m,
+        "f_nyquist_decimated_hz": f_nyq,
+        "f_nyquist_over_f_max": f_nyq / derived.f_max if derived.f_max > 0 else float("nan"),
+        "alias_level_db": derived.alias_level_db,
         "output_bytes_est": estimate_output_bytes(cfg, derived),
         "wall_time_s_est": _estimate_wall_time_s(derived),
         "zrad_source": "fdtd",
@@ -226,6 +236,10 @@ def _print_dry_run_summary(summary: dict[str, Any]) -> None:
             print(f"  {key}: {_sigfig4(val / 1e6)} MB (approx.)")
         elif key == "wall_time_s_est":
             print(f"  {key}: {_sigfig4(val)} s (C1 envelope)")
+        elif key == "alias_level_db":
+            print(f"  {key}: {_sigfig4(val)} dB re |S(f_max)|")
+        elif key == "f_nyquist_over_f_max":
+            print(f"  {key}: {_sigfig4(val)}")
         elif isinstance(val, float):
             print(f"  {key}: {_sigfig4(val)}")
         else:

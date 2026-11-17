@@ -169,13 +169,18 @@ radiator-resolution limit on $h$.
 | `cell_budget` | int | cells | 60,000,000 | Maximum total grid cells (including gap and CPML) at the chosen $h$ | Exceeding it is an error, reported by the dry run too (see [§i](#i-warnings-and-troubleshooting)) |
 | `pulse_db` | float | dB | −40.0 | Pulse spectrum level at `pulse_f_factor`·`f_max` | < 0 |
 | `pulse_f_factor` | float | — | 1.2 | See `pulse_db` | > 1 |
+| `alias_rejection_db` | float | dB | 100.0 | Huygens decimation: worst alias partner $|S(f_a)|/|S(f_\mathrm{max})|$ limit (analytic pulse spectrum) | > 0 |
+| `decimation_override` | int or `null` | — | `null` | Force Huygens/surface decimation $M$ (validation sweeps) | ≥ 1 |
 | `n_transits` | float | — | 3.0 | Run length in box transits (see [§d](#d-choosing-numerics)) | Raise it if the tail warning appears; the shipped validation and demo configs use 14 |
 | `min_edge_cells` | int | cells | 3 | Minimum clearance between the radiator outline and any face edge (box mode) | Smaller clearance is an error |
 
-The Huygens surface offset is fixed at 3 cells in 0.1.0 and has no config
-key. Its time samples are decimated by
-$M = \lfloor 1/(2.5\,f_\mathrm{max}\,\Delta t)\rfloor$. Within the band that
-is lossless, because the pulse limits the content.
+The Huygens surface offset is fixed at 3 cells and has no config key. Its time
+samples are decimated by the largest $M \ge 1$ (capped at the historical
+$2.5\,f_\mathrm{max}$ rule) such that the analytic pulse spectrum at the worst
+alias partner $f_a = 2 f_N - f_\mathrm{max}$ with $f_N = 1/(2M\Delta t)$ is at
+least `alias_rejection_db` below $|S(f_\mathrm{max})|$. Stored on the run as
+`derived.decimation_m` and `derived.alias_level_db`; see dry-run summary and
+`/meta/accuracy`.
 
 ### `output`
 
@@ -439,7 +444,7 @@ velocity pulse. Time arrays are in s.
 | `/meta/derived_json` | scalar | bytes | SI | All `Derived` fields as JSON (`h`, `dt`, `n_steps`, `nx/ny/nz`, `realized_W/H/D`, `pulse_sigma`, `pulse_t0`, `ppw_realized`, `cell_budget_exceeded`, …); `Result.derived` ignores keys it does not know |
 | `/meta/sample_times_decimated_p` | $(n_d,)$ | float64 | s | $(nM+1)\Delta t$ |
 | `/meta/sample_times_decimated_v` | $(n_d,)$ | float64 | s | $(nM+\tfrac12)\Delta t$ |
-| `/meta/accuracy` (attrs) | — | — | — | `ppw_realized`, `cells_across_radiator`, `h` [m], `notes` (C8/C9 error summary) |
+| `/meta/accuracy` (attrs) | — | — | — | `ppw_realized`, `cells_across_radiator`, `h` [m], `alias_level_db` [dB], `notes` (C8/C9/C11 error summary) |
 | `/radiator/p_avg` | $(n_s,)$ | float64 | Pa | Area-weighted radiator face pressure $\langle p\rangle$ (with the $(h/2)\rho\,\partial v/\partial t$ face correction) |
 | `/radiator/times_p` | $(n_s,)$ | float64 | s | $(n+1)\Delta t$, the time level of `p_avg` |
 | `/radiator/v_pulse_integer` | $(n_s,)$ | float64 | m/s | Drive $v(t)$ at `times_p` |

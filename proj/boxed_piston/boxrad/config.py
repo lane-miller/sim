@@ -65,6 +65,7 @@ class Numerics:
 
     ppw: float = 20.0
     h_override: float | None = None  # fixed *h* (validation sweeps); skips ppw/radiator cap
+    decimation_override: int | None = None  # Huygens/box decimation M (validation sweeps)
     cells_across_radiator: int = 10
     cfl_safety: float = 0.99
     gap_cells: int | None = None
@@ -76,6 +77,7 @@ class Numerics:
     cell_budget: int = 60_000_000
     pulse_db: float = -40.0
     pulse_f_factor: float = 1.2
+    alias_rejection_db: float = 100.0
     n_transits: float = 3.0
     min_edge_cells: int = 3
 
@@ -164,6 +166,8 @@ class Derived:
     cpml_sides: tuple[bool, bool, bool, bool, bool, bool]
     geometry: GeometryMode
     cell_budget_exceeded: bool = False
+    decimation_m: int = 1
+    alias_level_db: float = float("nan")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Derived:
@@ -172,6 +176,8 @@ class Derived:
         blob = {k: v for k, v in data.items() if k in known}
         if "cpml_sides" in blob:
             blob["cpml_sides"] = tuple(blob["cpml_sides"])
+        blob.setdefault("decimation_m", 1)
+        blob.setdefault("alias_level_db", float("nan"))
         return cls(**blob)
 
 
@@ -311,6 +317,110 @@ def _memory_bytes(nx: int, ny: int, nz: int, cpml_cells: int) -> float:
     return float(estimate_memory_bytes(nx, ny, nz, cpml_cells))
 
 
+def decimation_m_cap(f_max: float, dt: float) -> int:
+    """Upper search limit for Huygens decimation (historical ``2.5·f_max`` rule)."""
+    return max(1, int(math.floor(1.0 / (2.5 * float(f_max) * float(dt)))))
+
+
+def worst_huygens_alias_ratio(
+    f_max: float,
+    sigma: float,
+    t0: float,
+    dt: float,
+    m: int,
+) -> float:
+    """`|S(f_lo)|/|S(f_max)|` for `f_lo = max(2 f_N − f_max, 0)` (worst alias partner at `f_max`)."""
+    from boxrad.source import pulse_spectrum
+
+    f_nyq = 1.0 / (2.0 * float(m) * float(dt))
+    f_lo = 2.0 * f_nyq - float(f_max)
+    if f_lo <= 0.0:
+        return 0.0
+    s_ref = abs(pulse_spectrum(float(f_max), sigma, t0))
+    if s_ref <= 0.0:
+        return float("inf")
+    return float(abs(pulse_spectrum(f_lo, sigma, t0)) / s_ref)
+
+
+def worst_huygens_alias_level_db(
+    f_max: float,
+    sigma: float,
+    t0: float,
+    dt: float,
+    m: int,
+) -> float:
+    ratio = worst_huygens_alias_ratio(f_max, sigma, t0, dt, m)
+    if ratio <= 0.0:
+        return float("-inf")
+    return 20.0 * math.log10(ratio)
+
+
+def choose_decimation_m(
+    f_max: float,
+    sigma: float,
+    t0: float,
+    dt: float,
+    *,
+    alias_rejection_db: float,
+) -> tuple[int, float]:
+    """Largest ``m ≥ 1`` with alias level ≤ ``−alias_rejection_db`` dB re ``|S(f_max)|``."""
+    floor = 10.0 ** (-float(alias_rejection_db) / 20.0)
+    m_cap = decimation_m_cap(f_max, dt)
+    m_best = 1
+    level_db = worst_huygens_alias_level_db(f_max, sigma, t0, dt, 1)
+    for m in range(1, m_cap + 1):
+        f_nyq = 1.0 / (2.0 * m * dt)
+        if 2.0 * f_nyq - f_max <= 0.0:
+            break
+        ratio = worst_huygens_alias_ratio(f_max, sigma, t0, dt, m)
+        if ratio <= floor:
+            m_best = m
+            level_db = 20.0 * math.log10(max(ratio, 1e-300))
+        else:
+            break
+    return m_best, level_db
+
+
+@dataclass(frozen=True)
+class _FMaxForPulse:
+    f_max: float
+
+
+def pulse_params(cfg: Config, derived: Derived) -> tuple[float, float]:
+    """Gaussian velocity-pulse width ``σ`` and start delay ``t0 = 6σ`` (brief §2)."""
+    num = cfg.numerics
+    f_max = float(derived.f_max)
+    att = math.pow(10.0, -num.pulse_db / 20.0)
+    sigma = math.sqrt(2.0 * math.log(att)) / (
+        2.0 * math.pi * num.pulse_f_factor * f_max
+    )
+    return sigma, 6.0 * sigma
+
+
+def resolve_decimation(
+    cfg: Config,
+    *,
+    f_max: float,
+    sigma: float,
+    t0: float,
+    dt: float,
+) -> tuple[int, float]:
+    """Huygens decimation factor and realized worst-case alias level [dB re ``|S(f_max)|``)."""
+    num = cfg.numerics
+    if num.decimation_override is not None:
+        m = max(1, int(num.decimation_override))
+    else:
+        m, _ = choose_decimation_m(
+            f_max,
+            sigma,
+            t0,
+            dt,
+            alias_rejection_db=num.alias_rejection_db,
+        )
+    level_db = worst_huygens_alias_level_db(f_max, sigma, t0, dt, m)
+    return m, level_db
+
+
 def derive(cfg: Config) -> Derived:
     """Compute derived FDTD parameters from *cfg* (SI units throughout).
 
@@ -337,6 +447,11 @@ def derive(cfg: Config) -> Derived:
       delay ``t0 = 6σ``.
     * **Run length** — ``t0 + 6σ + n_transits·(max box dimension + 2·gap)/c``;
       ``n_steps = ceil(run_time / Δt)``.
+    * **Huygens decimation** — largest ``m ≥ 1`` such that for ``f_N = 1/(2 m Δt)`` the
+      worst alias partner ``f_a = 2 f_N − f_max`` has
+      ``|S(f_a)|/|S(f_max)| ≤ 10^(−alias_rejection_db/20)`` (analytic
+      :func:`~boxrad.source.pulse_spectrum`); search capped at the historical
+      ``2.5·f_max`` rule. ``decimation_override`` replaces ``m`` (validation).
     """
     c = cfg.air.c
     num = cfg.numerics
@@ -370,9 +485,7 @@ def derive(cfg: Config) -> Derived:
     cpml_alpha = num.cpml_alpha_factor * math.pi * cfg.band.f_min
     memory_bytes = _memory_bytes(nx, ny, nz, num.cpml_cells)
 
-    att = math.pow(10.0, -num.pulse_db / 20.0)
-    sigma = math.sqrt(2.0 * math.log(att)) / (2.0 * math.pi * num.pulse_f_factor * f_max)
-    t0 = 6.0 * sigma
+    sigma, t0 = pulse_params(cfg, _FMaxForPulse(f_max))  # type: ignore[arg-type]
 
     if cfg.geometry == "baffle":
         z_extent = float(gap_cells + num.cpml_cells) * h
@@ -389,6 +502,10 @@ def derive(cfg: Config) -> Derived:
         cpml_sides = CPML_SIDES_BAFFLE
     else:
         cpml_sides = CPML_SIDES_ALL
+
+    decimation_m, alias_level_db = resolve_decimation(
+        cfg, f_max=f_max, sigma=sigma, t0=t0, dt=dt
+    )
 
     return Derived(
         f_max=f_max,
@@ -420,6 +537,8 @@ def derive(cfg: Config) -> Derived:
         cpml_sides=cpml_sides,
         geometry=cfg.geometry,
         cell_budget_exceeded=cell_budget_exceeded,
+        decimation_m=decimation_m,
+        alias_level_db=alias_level_db,
     )
 
 
@@ -539,5 +658,21 @@ def validate(
         warnings.append(
             f"h_override={num.h_override:.6g} m active (intended for validation sweeps)"
         )
+
+    if num.decimation_override is not None:
+        if int(num.decimation_override) < 1:
+            errors.append("numerics.decimation_override must be an integer ≥ 1")
+        else:
+            warnings.append(
+                f"decimation_override={int(num.decimation_override)} active "
+                "(intended for validation sweeps)"
+            )
+
+    if math.isfinite(derived.alias_level_db):
+        if derived.alias_level_db > -num.alias_rejection_db + 1e-6:
+            warnings.append(
+                f"Huygens alias level {derived.alias_level_db:.1f} dB re |S(f_max)| "
+                f"> −{num.alias_rejection_db:g} dB target (decimation_m={derived.decimation_m})"
+            )
 
     return errors, warnings

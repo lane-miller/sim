@@ -19,6 +19,7 @@ boxrad.egg-info/requires.txt
 boxrad.egg-info/top_level.txt
 boxrad/post/__init__.py
 boxrad/post/bem_ref.py
+boxrad/post/directivity.py
 boxrad/post/finalize.py
 boxrad/post/kirchhoff.py
 boxrad/post/reference.py
@@ -29,6 +30,8 @@ tests/test_baffle_cpml.py
 tests/test_bem_ref.py
 tests/test_config.py
 tests/test_cpml.py
+tests/test_decimation.py
+tests/test_directivity.py
 tests/test_grid.py
 tests/test_grid_box.py
 tests/test_imports.py

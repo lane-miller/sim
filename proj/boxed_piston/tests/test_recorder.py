@@ -106,7 +106,7 @@ def _run_recorder(
 def test_hdf5_structure_shapes_and_finite():
     cfg, d, g, boundary = _small_problem(n_steps_override=24)
     n_steps = d.n_steps
-    m = decimation_factor(d.f_max, d.dt)
+    m = d.decimation_m
     n_dec = (n_steps + m - 1) // m
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -349,7 +349,7 @@ def test_buffer_sizes_bounded():
         rec.close()
 
 
-def test_decimation_factor_floor():
+def test_decimation_factor_cap():
     assert decimation_factor(10_000.0, 1e-6) >= 1
     m = decimation_factor(4_000.0, 2e-5)
     expect = max(1, int(math.floor(1.0 / (2.5 * 4_000.0 * 2e-5))))

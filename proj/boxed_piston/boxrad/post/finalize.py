@@ -17,6 +17,13 @@ _ACCURACY_NOTES = (
     "radiator-edge reactance excess ≈1.5–2.6% at 10–12 cells across the short "
     "side, decreasing with resolution (C9)"
 )
+_HUYGENS_POWER_NOTE = (
+    "direct Huygens flux ½Re Σ p v_n* carries O((kh)²) discrete-product error: "
+    "≈0.5 % at f_max at ~23 ppw (C10), ≈0.03 % at ~71 ppw (C11); pre-0.2.0 1.04 % "
+    "included decimation aliasing (fixed by alias-aware decimation); "
+    "far-field power (primary check) ≤ 0.43 %; "
+    "Huygens/surface decimation alias level ≤ −alias_rejection_db dB re |S(f_max)| (C11)"
+)
 
 
 def cells_across_radiator(cfg: Config, derived: Derived) -> float:
@@ -75,7 +82,8 @@ def write_finalize_meta(
     acc.attrs["ppw_realized"] = float(derived.ppw_realized)
     acc.attrs["cells_across_radiator"] = float(cells_across_radiator(cfg, derived))
     acc.attrs["h"] = float(derived.h)
-    acc.attrs["notes"] = _ACCURACY_NOTES
+    acc.attrs["alias_level_db"] = float(derived.alias_level_db)
+    acc.attrs["notes"] = f"{_ACCURACY_NOTES} {_HUYGENS_POWER_NOTE}"
 
     meta.attrs["conventions"] = conventions_text(cfg)
     meta.attrs["boxrad_version"] = __version__

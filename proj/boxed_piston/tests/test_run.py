@@ -20,7 +20,6 @@ from boxrad.config import (
     derive,
 )
 from boxrad.kernels import step as kernel_step  # noqa: E402
-from boxrad.recorder import decimation_factor  # noqa: E402
 from boxrad.runner import run  # noqa: E402
 from boxrad.source import velocity_pulse  # noqa: E402
 
@@ -62,7 +61,7 @@ def test_run_hdf5_structure(patch_few_steps):
     cfg = _tiny_config()
     n_steps = patch_few_steps
     d = derive(cfg)
-    m = decimation_factor(d.f_max, d.dt)
+    m = d.decimation_m
     n_dec = (n_steps + m - 1) // m
 
     with tempfile.TemporaryDirectory() as tmp:
