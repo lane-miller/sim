@@ -30,6 +30,7 @@ from boxrad.post.transfer import (
 )
 from boxrad.recorder import resolve_huygens_offset
 from boxrad.info import main as info_main
+from boxrad.post.finalize import conventions_text
 from boxrad.post.zrad import zrad_at_frequencies
 from boxrad.result import Result
 from boxrad.runner import run
@@ -344,7 +345,11 @@ def test_meta_self_checks(patch_few_steps):
             assert "tail_db" in meta.attrs
             assert "boxrad_version" in meta.attrs
             assert "conventions" in meta.attrs
-            assert "e^{+jωt}" in str(meta.attrs["conventions"])
+            conv = str(meta.attrs["conventions"])
+            assert conv == conventions_text(cfg)
+            assert "origin = radiator center on the front face" in conv
+            assert "directivity phase referenced to the origin" in conv
+            assert "Yee" not in conv
             acc = f["meta/accuracy"]
             assert "ppw_realized" in acc.attrs
             assert "cells_across_radiator" in acc.attrs

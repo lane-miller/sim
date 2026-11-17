@@ -563,6 +563,11 @@ n_phi)`, which can also be applied to any pattern of your own.
 
 ## h. Conventions
 
+After finalize, `boxrad-info` prints the canonical `/meta/conventions` string
+(also from `conventions_text` in `boxrad/post/finalize.py`):
+
+`e^{+jωt}; z = <p>_rad/(ρc v); H = p/v [Pa/(m/s)]; coordinates: origin = radiator center on the front face; +z outward (radiating axis); box occupies z ∈ [−D, 0] (box mode) or baffle plane z = 0 (baffle mode); θ from +z, φ from +x; directivity phase referenced to the origin`
+
 - **Time:** $e^{+j\omega t}$. Phasors are **peak** amplitudes:
   $p(t) = \mathrm{Re}\{P e^{j\omega t}\}$. NumPy's forward FFT sign is used
   as is.

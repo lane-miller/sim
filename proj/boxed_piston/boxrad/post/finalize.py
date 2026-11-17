@@ -28,24 +28,18 @@ def cells_across_radiator(cfg: Config, derived: Derived) -> float:
     return d / derived.h
 
 
+_CONVENTIONS_PREFIX = "e^{+jωt}; z = <p>_rad/(ρc v); H = p/v [Pa/(m/s)]; "
+_COORDINATES = (
+    "coordinates: origin = radiator center on the front face; +z outward "
+    "(radiating axis); box occupies z ∈ [−D, 0] (box mode) or baffle plane "
+    "z = 0 (baffle mode); θ from +z, φ from +x; directivity phase referenced "
+    "to the origin"
+)
+
+
 def conventions_text(cfg: Config) -> str:
-    base = (
-        "e^{+jωt}; z = <p>_rad/(ρc v); H = p/v [Pa/(m/s)]; "
-    )
-    if cfg.geometry == "baffle":
-        coord = (
-            "coordinates: radiator-centered xy with z=0 on the baffle plane and "
-            "+z outward; Yee pressure cell centers follow grid.py baffle mapping "
-            "(x_p = −x_c−W/2+(i−i_box+½)h, z_p=(k+½)h)"
-        )
-    else:
-        coord = (
-            "coordinates: rigid-box minimum corner at "
-            "(-x_c−W/2, -y_c−H/2, -D) m with +z outward from the radiator face; "
-            "Yee p cell centers follow grid.py box mapping "
-            "(x_p, y_p, z_p from i_box, j_box, k_box)"
-        )
-    return base + coord
+    del cfg
+    return _CONVENTIONS_PREFIX + _COORDINATES
 
 
 def compute_finalize_results(
