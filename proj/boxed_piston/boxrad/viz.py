@@ -198,7 +198,29 @@ def plot_face_mesh(
     colorbar_pad: float | None = None,
     **mesh_kwargs: Any,
 ) -> plt.Figure:
-    """Discretized front-face radiator weights with Yee cell grid."""
+    """Plot the front face: per-cell radiator area weights on the Yee grid.
+
+    Shows the weight ``w ∈ [0, 1]`` of each ``h × h`` front-face cell, the exact
+    radiator outline (red), the face outline, the radiator center (origin) and
+    the face center. The title lists ``h``, the cell count, ``Σw``,
+    ``S_grid = h² Σw`` and the exact area ``S``. Mesh lines are thinned above
+    200 cells per side.
+
+    Args:
+        source: ``Config``, :class:`~boxrad.result.Result`, or a path to a JSON
+            config or ``.h5``/``.hdf5`` result.
+        ax: Existing Matplotlib axes to draw into; a new figure is created if None.
+        show: Call ``plt.show()`` (only when this function created the figure).
+        out: If given, save the figure as PNG to this path (150 dpi).
+        colorbar_pad: Optional ``pad`` passed to ``fig.colorbar``.
+        **mesh_kwargs: Extra keyword arguments for ``ax.pcolormesh``.
+
+    Returns:
+        The Matplotlib figure.
+
+    Raises:
+        ValueError: Unknown radiator shape.
+    """
     cfg, derived_in = _load_source(source)
     derived = derived_in if derived_in is not None else derive(cfg)
     grid = Grid(cfg, derived)
@@ -322,7 +344,26 @@ def plot_geometry(
     out: str | Path | None = None,
     show: bool = True,
 ) -> plt.Figure:
-    """Two-panel geometry figure (3D box + front-face mesh)."""
+    """Two-panel geometry figure: 3-D view (left) and front-face mesh (right).
+
+    The 3-D panel shows the realized (h-snapped) box, or the baffle plane, the
+    radiator outline, the origin and the ``+z`` radiating direction (green
+    arrow), plus optional Huygens patch centers and probes. The right panel is
+    :func:`plot_face_mesh`. Coordinates are in m with the origin at the
+    radiator center.
+
+    Args:
+        source: ``Config``, :class:`~boxrad.result.Result`, or a path to a JSON
+            config or ``.h5``/``.hdf5`` result.
+        ax: Unused; a new figure is always created.
+        show_huygens: Overlay Huygens-surface patch centers (orange).
+        show_probes: Mark ``output.probes`` targets (magenta).
+        out: If given, save the figure as PNG to this path (150 dpi).
+        show: Call ``plt.show()`` (blocks in interactive back ends).
+
+    Returns:
+        The Matplotlib figure.
+    """
     cfg, derived_in = _load_source(source)
     derived = derived_in if derived_in is not None else derive(cfg)
     grid = Grid(cfg, derived)
@@ -448,6 +489,14 @@ def plot_geometry(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """``boxrad-plot CONFIG_OR_H5 [-o PNG] [--no-show] [--huygens] [--face]``.
+
+    Args:
+        argv: Argument list without the program name (default ``sys.argv[1:]``).
+
+    Returns:
+        Exit code 0.
+    """
     parser = argparse.ArgumentParser(description="Plot boxrad geometry from config or HDF5")
     parser.add_argument("config_or_h5", type=Path, help="JSON config or result HDF5")
     parser.add_argument("-o", "--output", type=Path, default=None, help="Also write PNG to this path")

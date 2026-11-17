@@ -17,12 +17,41 @@ def _fmt_size(nbytes: int) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """``boxrad-info H5``: print summary, provenance (``boxrad_version``,
+    ``zrad_source``, ``/results/zrad`` range and point count), ``/meta``
+    conventions, ``/meta/accuracy``, every dataset, file size.
+
+    Args:
+        argv: Argument list without the program name (default ``sys.argv[1:]``).
+
+    Returns:
+        Exit code 0.
+
+    Raises:
+        FileNotFoundError: ``H5`` does not exist.
+    """
     parser = argparse.ArgumentParser(description="Summarize a boxrad HDF5 result file")
     parser.add_argument("h5", type=Path, help="HDF5 result path")
     args = parser.parse_args(argv)
     path = args.h5
     res = Result(path)
     print(res.summary())
+    meta = res.meta
+    print("\n--- provenance ---")
+    print(f"  boxrad_version: {meta.get('boxrad_version', '?')}")
+    print(f"  zrad_source: {meta.get('zrad_source', '?')}")
+    f_zr, _ = res.z()
+    if f_zr.size:
+        print(
+            f"  /results/zrad: {f_zr.size} points, "
+            f"{f_zr.min().item():.6g}–{f_zr.max().item():.6g} Hz"
+        )
+    else:
+        print("  /results/zrad: empty")
+    conventions = str(meta.get("conventions", "")).strip()
+    print("\n--- conventions ---")
+    for line in conventions.splitlines() or ["?"]:
+        print(f"  {line}")
     print("\n--- accuracy ---")
     for key, val in sorted(res.accuracy.items()):
         print(f"  {key}: {val}")

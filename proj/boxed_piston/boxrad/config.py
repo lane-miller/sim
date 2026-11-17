@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Literal
 
 F_MAX_CAP_HZ = 20_000.0
@@ -20,12 +20,16 @@ GeometryMode = Literal["box", "baffle"]
 
 @dataclass
 class Air:
+    """Lossless air: sound speed ``c`` [m/s] and density ``rho`` [kg/m³]."""
+
     c: float = 343.0
     rho: float = 1.204
 
 
 @dataclass
 class Box:
+    """Rigid box [m]: front face ``W`` (x) × ``H`` (y), depth ``D`` (−z). Each side is rounded to h."""
+
     W: float
     H: float
     D: float
@@ -33,6 +37,14 @@ class Box:
 
 @dataclass
 class Radiator:
+    """Rigid flush radiator on the +z face.
+
+    ``dims`` [m]: circle ``[diameter]``; rect ``[width, height]``; racetrack
+    ``[width, height]`` with semicircular ends of diameter ``min(width, height)``
+    on the longer axis. ``(x_c, y_c)`` [m] is the radiator center relative to the
+    front-face center (not snapped to h).
+    """
+
     shape: RadiatorShape
     dims: list[float]
     x_c: float = 0.0
@@ -41,12 +53,16 @@ class Radiator:
 
 @dataclass
 class Band:
+    """Frequency band [Hz]; ``f_max=None`` means ``min(20 kHz, f at ka = 10)``."""
+
     f_min: float = 20.0
     f_max: float | None = None
 
 
 @dataclass
 class Numerics:
+    """Discretization, absorber, pulse, and run-length controls (see :func:`derive`)."""
+
     ppw: float = 20.0
     h_override: float | None = None  # fixed *h* (validation sweeps); skips ppw/radiator cap
     cells_across_radiator: int = 10
@@ -75,6 +91,12 @@ class Output:
 
 @dataclass
 class Config:
+    """Complete run configuration; JSON sections map one-to-one to the fields.
+
+    Unknown keys inside a section raise ``TypeError`` in :meth:`from_dict`;
+    unknown top-level keys (e.g. ``"_doc"``) are ignored.
+    """
+
     geometry: GeometryMode = "box"
     air: Air = field(default_factory=Air)
     box: Box | None = None
@@ -111,11 +133,12 @@ class Config:
 
 @dataclass
 class Derived:
+    """Per-run parameters computed by :func:`derive` (SI units; stored in ``/meta/derived_json``)."""
+
     f_max: float
     lambda_min: float
     h: float
     dt: float
-    zrad_fallback: bool
     realized_W: float
     realized_H: float
     realized_D: float
@@ -140,6 +163,16 @@ class Derived:
     ppw_realized: float
     cpml_sides: tuple[bool, bool, bool, bool, bool, bool]
     geometry: GeometryMode
+    cell_budget_exceeded: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Derived:
+        """Build from a stored ``derived_json`` blob, ignoring keys this version does not know."""
+        known = {f.name for f in fields(cls)}
+        blob = {k: v for k, v in data.items() if k in known}
+        if "cpml_sides" in blob:
+            blob["cpml_sides"] = tuple(blob["cpml_sides"])
+        return cls(**blob)
 
 
 CPML_SIDES_ALL = (True, True, True, True, True, True)
@@ -174,6 +207,20 @@ def _radiator_half_extents(radiator: Radiator) -> tuple[float, float]:
     if radiator.shape == "racetrack":
         return radiator.dims[0] / 2.0, radiator.dims[1] / 2.0
     raise ValueError(f"unknown radiator shape: {radiator.shape!r}")
+
+
+def baffle_radiator_clip(radiator: Radiator, derived: Derived) -> float:
+    """Largest distance (m) by which the radiator extends past the baffle-mode mask.
+
+    In baffle mode the radiator mask covers ``[-x_c − W/2, -x_c + W/2]`` (and likewise
+    in y), with ``W`` the radiator bounding box rounded to whole cells, while the
+    radiator itself spans ``[−w/2, w/2]`` around the origin. Returns 0 if nothing is
+    clipped.
+    """
+    hx, hy = _radiator_half_extents(radiator)
+    clip_x = hx + abs(radiator.x_c) - 0.5 * derived.realized_W
+    clip_y = hy + abs(radiator.y_c) - 0.5 * derived.realized_H
+    return max(0.0, clip_x, clip_y)
 
 
 def format_realized_box_dims(
@@ -273,8 +320,8 @@ def derive(cfg: Config) -> Derived:
       ``f_ka10 = 10·c/(π·D)`` and ``D`` the smallest radiator dimension.
     * **λ_min** — ``c / f_max``.
     * **h** — ``numerics.h_override`` if set; else ``min(λ_min/ppw, D/cells_across_radiator)``.
-      If the resulting domain cell count exceeds ``cell_budget``, keep ``h = λ_min/ppw``
-      (or the override) and set ``zrad_fallback`` (analytic Z_rad path in later stages).
+      If the resulting domain exceeds ``cell_budget``, ``cell_budget_exceeded`` is set
+      and :func:`validate` reports an error (there is no coarser fallback).
     * **Δt** — ``cfl_safety · h / (c·√3)`` (3-D CFL).
     * **Realized box** — each side rounded to an integer number of cells at ``h``.
     * **Radiator center in cells** — ``round(x_c/h)``, ``round(y_c/h)`` on the front face.
@@ -307,25 +354,14 @@ def derive(cfg: Config) -> Derived:
     else:
         count_fn = lambda hh: _domain_counts(cfg.box, hh, gap_cells, num.cpml_cells)  # noqa: E731
 
-    zrad_fallback = False
     if num.h_override is not None:
         h = float(num.h_override)
-        nbx, nby, nbz, nx, ny, nz, _, _, _ = count_fn(h)
-        if nx * ny * nz > num.cell_budget:
-            zrad_fallback = True
     else:
-        h_from_ppw = lambda_min / num.ppw
-        h_from_radiator = D / num.cells_across_radiator
-        h_try = min(h_from_ppw, h_from_radiator)
-        nbx, nby, nbz, nx, ny, nz, _, _, _ = count_fn(h_try)
-        if nx * ny * nz > num.cell_budget:
-            h = h_from_ppw
-            zrad_fallback = True
-        else:
-            h = h_try
+        h = min(lambda_min / num.ppw, D / num.cells_across_radiator)
 
     nbx, nby, nbz, nx, ny, nz, rw, rh, rd = count_fn(h)
     total_cells = nx * ny * nz
+    cell_budget_exceeded = total_cells > num.cell_budget
     dt = num.cfl_safety * h / (c * SQRT3)
 
     radiator_ic = round(cfg.radiator.x_c / h)
@@ -359,7 +395,6 @@ def derive(cfg: Config) -> Derived:
         lambda_min=lambda_min,
         h=h,
         dt=dt,
-        zrad_fallback=zrad_fallback,
         realized_W=rw,
         realized_H=rh,
         realized_D=rd,
@@ -384,6 +419,7 @@ def derive(cfg: Config) -> Derived:
         ppw_realized=ppw_realized,
         cpml_sides=cpml_sides,
         geometry=cfg.geometry,
+        cell_budget_exceeded=cell_budget_exceeded,
     )
 
 
@@ -393,7 +429,17 @@ def validate(
     *,
     ram_limit_bytes: float = DEFAULT_RAM_LIMIT_BYTES,
 ) -> tuple[list[str], list[str]]:
-    """Return ``(errors, warnings)`` lists; no printing."""
+    """Pre-flight checks of *cfg* against *derived*; no printing.
+
+    Args:
+        cfg: Run configuration.
+        derived: Output of :func:`derive` for *cfg*.
+        ram_limit_bytes: Field-memory estimate above this is an error.
+
+    Returns:
+        ``(errors, warnings)``: lists of human-readable messages. Any error
+        stops :func:`boxrad.run`; warnings are printed and the run continues.
+    """
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -432,8 +478,33 @@ def validate(
     if ka > 10.0:
         warnings.append(f"ka={ka:.2f} > 10 at f_max={derived.f_max:.1f} Hz")
 
-    if derived.zrad_fallback:
-        warnings.append("cell-budget fallback active (zrad_source will be analytic)")
+    if derived.cell_budget_exceeded:
+        errors.append(
+            f"domain {derived.nx}×{derived.ny}×{derived.nz} = {derived.total_cells:,} cells "
+            f"at h={derived.h * 1e3:.4g} mm exceeds numerics.cell_budget="
+            f"{num.cell_budget:,}; raise h (lower numerics.cells_across_radiator or "
+            f"numerics.ppw, or set numerics.h_override), lower band.f_max, or raise "
+            f"numerics.cell_budget if RAM allows"
+        )
+
+    if cfg.geometry == "baffle":
+        clip = baffle_radiator_clip(cfg.radiator, derived)
+        offset = (cfg.radiator.x_c, cfg.radiator.y_c) != (0.0, 0.0)
+        cause = (
+            f"radiator offset (x_c={cfg.radiator.x_c:g}, y_c={cfg.radiator.y_c:g}) m"
+            if offset
+            else "rounding of the radiator bounding box to whole cells"
+        )
+        if clip > derived.h * (1.0 + 1e-9):
+            errors.append(
+                f"baffle mode: {cause} clips the radiator outline by "
+                f"{clip / derived.h:.2f} cells (> 1 cell); use x_c = y_c = 0 in baffle mode"
+            )
+        elif clip > 1e-9 * derived.h:
+            warnings.append(
+                f"baffle mode: {cause} clips the radiator outline by "
+                f"{clip / derived.h:.2f} cells (S_grid slightly below S)"
+            )
 
     _ppw_dispersion_ref = 20.0  # brief §2 default; warning is vs realized spacing, not config ppw
     if derived.ppw_realized < _ppw_dispersion_ref - 1e-9:

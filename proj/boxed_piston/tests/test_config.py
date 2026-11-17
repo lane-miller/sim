@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import math
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ from boxrad.config import (
     Band,
     Box,
     Config,
+    Derived,
     Numerics,
     Output,
     Radiator,
@@ -59,16 +62,76 @@ def test_default_f_max_from_ka10():
     assert d.f_max == pytest.approx(expected, rel=1e-5)
 
 
-def test_zrad_fallback_tiny_radiator_large_box():
+def test_cell_budget_exceeded_is_error_tiny_radiator_large_box():
     cfg = _base_cfg(
         box=Box(W=0.5, H=0.5, D=0.5),
         radiator=Radiator("circle", dims=[0.002]),
         numerics=Numerics(cell_budget=500_000, ppw=20.0),
     )
     d = derive(cfg)
-    assert d.zrad_fallback is True
-    _, warnings = validate(cfg, d)
-    assert any("fallback" in w.lower() for w in warnings)
+    assert d.cell_budget_exceeded is True
+    assert d.h == pytest.approx(0.002 / 10, rel=1e-12)
+    errors, warnings = validate(cfg, d)
+    assert any("cell_budget" in e for e in errors)
+    assert not any("fallback" in w.lower() for w in warnings)
+    with pytest.raises(ValueError, match="cell_budget"):
+        run(cfg, dry_run=True, progress=False)
+
+
+def test_derived_from_dict_ignores_unknown_keys():
+    d = derive(_base_cfg())
+    blob = json.loads(json.dumps(asdict(d)))
+    blob.pop("cell_budget_exceeded")
+    blob["zrad_fallback"] = False
+    d2 = Derived.from_dict(blob)
+    assert d2.h == d.h
+    assert d2.cpml_sides == d.cpml_sides
+    assert d2.cell_budget_exceeded is False
+
+
+def test_within_cell_budget_no_error():
+    cfg = _base_cfg()
+    d = derive(cfg)
+    assert d.cell_budget_exceeded is False
+    errors, _ = validate(cfg, d)
+    assert not any("cell_budget" in e for e in errors)
+
+
+def _baffle_cfg(x_c: float = 0.0, y_c: float = 0.0) -> Config:
+    return Config(
+        geometry="baffle",
+        box=None,
+        radiator=Radiator("circle", dims=[0.1], x_c=x_c, y_c=y_c),
+        band=Band(f_min=100.0, f_max=6000.0),
+        output=Output(path="/tmp/baffle.h5"),
+    )
+
+
+def test_baffle_offset_subcell_warns():
+    h = derive(_baffle_cfg()).h
+    cfg = _baffle_cfg(x_c=0.25 * h)
+    d = derive(cfg)
+    errors, warnings = validate(cfg, d)
+    assert not errors
+    assert any("baffle mode" in w and "clips" in w for w in warnings)
+
+
+def test_baffle_offset_over_one_cell_is_error():
+    h = derive(_baffle_cfg()).h
+    cfg = _baffle_cfg(x_c=2.0 * h)
+    d = derive(cfg)
+    errors, _ = validate(cfg, d)
+    assert any("baffle mode" in e and "clips" in e for e in errors)
+    with pytest.raises(ValueError, match="clips"):
+        run(cfg, dry_run=True, progress=False)
+
+
+def test_baffle_centered_no_clip_message():
+    cfg = _baffle_cfg()
+    d = derive(cfg)
+    errors, warnings = validate(cfg, d)
+    assert not errors
+    assert not any("clips" in w for w in warnings)
 
 
 def test_radiator_too_close_to_edge_is_error():
@@ -153,9 +216,20 @@ def test_h_override_sets_spacing_and_ppw_realized():
     assert any("h_override" in w for w in warnings)
 
 
-def test_default_json_matches_config_defaults():
-    loaded = Config.from_json((CONFIGS / "default.json").read_text(encoding="utf-8"))
-    assert loaded.to_dict() == Config().to_dict()
+def test_default_json_loads_validates_derives():
+    cfg = Config.from_json((CONFIGS / "default.json").read_text(encoding="utf-8"))
+    assert cfg.geometry == "box"
+    assert cfg.box is not None
+    assert cfg.numerics.h_override is None
+    d = derive(cfg)
+    errors, warnings = validate(cfg, d)
+    assert not errors
+    assert not warnings
+    assert d.h == pytest.approx(343.0 / 3000.0 / 20.0, rel=1e-12)
+    assert (d.box_nx, d.box_ny, d.box_nz) == (35, 26, 44)
+    assert d.cell_budget_exceeded is False
+    summary = run(cfg, dry_run=True, progress=False)
+    assert summary["n_steps"] == d.n_steps
 
 
 def test_smoke_json_derive_validate_and_dry_run():

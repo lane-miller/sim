@@ -20,7 +20,7 @@ from boxrad.config import (
     derive,
 )
 from boxrad.grid import Grid
-from boxrad.post.kirchhoff import huygens_box_patches
+from boxrad.post.kirchhoff import dpdn_from_vn, huygens_box_patches, kh_pressure_loop
 from boxrad.post.transfer import (
     h_transfer_err,
     kh_huygens_pressure_at_points,
@@ -192,7 +192,133 @@ def test_directivity_on_axis_normalized(tiny_h5_run):
     assert f_hz >= 2.0 * cfg.band.f_min and f_hz <= 0.8 * cfg.band.f_max
     pat = res.directivity(0.0, 0.0, f_hz, normalize=True)
     assert pat.shape == (1, 1)
-    assert abs(pat[0, 0] - 1.0) < 1e-12
+    assert np.iscomplexobj(pat)
+    assert abs(pat[0, 0] - (1.0 + 0.0j)) < 1e-12
+    pat_raw = res.directivity(np.array([0.0, 0.7]), 0.0, f_hz)
+    pat_norm = res.directivity(np.array([0.0, 0.7]), 0.0, f_hz, normalize=True)
+    np.testing.assert_allclose(pat_norm[0], pat_raw[0] / pat_raw[0, 0], rtol=1e-12, atol=0)
+
+
+def test_directivity_matches_field_at_50m(tiny_h5_run):
+    path, cfg = tiny_h5_run
+    res = Result(path)
+    f_hz = 1000.0
+    r = 50.0
+    theta = np.array([0.0, 0.5, 1.0, 1.6, 2.4])
+    phi = 0.3
+    st = np.sin(theta)
+    pts = r * np.column_stack(
+        [st * np.cos(phi), st * np.sin(phi), np.cos(theta)]
+    )
+    D = res.directivity(theta, phi, f_hz)[0]
+    H = res.field(pts, f_hz)[0]
+    k = 2.0 * np.pi * f_hz / cfg.air.c
+    approx = r * np.exp(1j * k * r) * H
+    db = 20.0 * np.log10(np.abs(approx) / np.abs(D))
+    ph = np.rad2deg(np.angle(approx / D))
+    assert np.max(np.abs(db)) < 0.2, db
+    assert np.max(np.abs(ph)) < 2.0, ph
+
+
+def test_field_volume_velocity_is_velocity_over_S_grid(tiny_h5_run):
+    path, cfg = tiny_h5_run
+    res = Result(path)
+    pts = np.array([[0.0, 0.0, 1.0], [0.3, -0.2, 0.4], [-0.4, 0.1, -0.3]])
+    f = np.array([300.0, 1500.0])
+    h_v = res.field(pts, f)
+    h_q = res.field(pts, f, per="volume_velocity")
+    np.testing.assert_allclose(h_q * res.S_grid, h_v, rtol=1e-12, atol=0)
+
+
+def test_field_in_face_plane_beyond_surface_is_accepted(tiny_h5_run):
+    path, cfg = tiny_h5_run
+    res = Result(path)
+    f_hz = 900.0
+    patches, V, p_face, vn_face = load_huygens_spectra(path, res.derived, f_hz)
+    h = float(res.derived.h)
+    top = patches.normals[:, 2] > 0.5
+    z_top = float(np.max(patches.centers[top, 2]))
+    x_out = float(np.max(patches.centers[:, 0])) + 4.0 * h
+    pt = np.array([[x_out, 0.0, z_top]])
+    assert min_distance_to_huygens_surface(pt[0], patches) > 3.0 * h
+    h_fd = res.field(pt, f_hz)
+    p_kh = kh_huygens_pressure_at_points(
+        pt, patches, p_face, vn_face, f_hz, cfg.air.rho, cfg.air.c, geometry="box"
+    )
+    np.testing.assert_allclose(h_fd[0], p_kh / V, rtol=1e-12, atol=0)
+
+
+def test_kh_box_fast_path_matches_reference_loop(tiny_h5_run):
+    path, cfg = tiny_h5_run
+    res = Result(path)
+    f_hz = 700.0
+    rho, c = cfg.air.rho, cfg.air.c
+    patches, _, p_face, vn_face = load_huygens_spectra(path, res.derived, f_hz)
+    pts = np.array([[0.0, 0.0, 0.3], [0.2, -0.1, 0.05], [-0.15, 0.1, -0.2]])
+    fast = kh_huygens_pressure_at_points(
+        pts, patches, p_face, vn_face, f_hz, rho, c, geometry="box"
+    )
+    omega = np.array([2.0 * np.pi * f_hz])
+    k = omega / c
+    dpdn = dpdn_from_vn(np.asarray(vn_face)[np.newaxis, :], omega, rho)
+    ref = kh_pressure_loop(pts, patches, np.asarray(p_face)[np.newaxis, :], dpdn, k)[0]
+    np.testing.assert_allclose(fast, ref, rtol=1e-10, atol=0)
+
+
+def test_band_check_raises_out_of_band(tiny_h5_run):
+    path, cfg = tiny_h5_run
+    res = Result(path)
+    f_min, f_max = res.band
+    pt = np.array([0.0, 0.0, 1.0])
+    for f_bad in (0.5 * f_min, 1.5 * f_max):
+        calls = (
+            lambda: res.z(f_bad),
+            lambda: res.Z_acoustic(f_bad),
+            lambda: res.Z_mechanical(f_bad),
+            lambda: res.power(f_bad),
+            lambda: res.field(pt, f_bad),
+            lambda: res.directivity(0.0, 0.0, f_bad),
+            lambda: res.directivity_index(f_bad),
+            lambda: res.surface_p(pt, f_bad),
+        )
+        for call in calls:
+            with pytest.raises(ValueError, match="allow_out_of_band"):
+                call()
+    with pytest.raises(ValueError, match="outside"):
+        res.Z_acoustic(np.array([0.5 * f_max, 1.5 * f_max]))
+
+
+def test_band_check_allow_out_of_band_warns(tiny_h5_run):
+    path, cfg = tiny_h5_run
+    res = Result(path)
+    f_min, f_max = res.band
+    f_lo = 0.5 * f_min
+    f_hi = 1.05 * f_max
+    pt = np.array([[0.0, 0.0, 1.0]])
+    with pytest.warns(UserWarning, match="outside"):
+        _, z = res.z(f_lo, allow_out_of_band=True)
+    assert z.shape == (1,)
+    with pytest.warns(UserWarning, match="outside"):
+        res.power(f_lo, allow_out_of_band=True)
+    with pytest.warns(UserWarning, match="outside"):
+        h_fd = res.field(pt, f_hi, allow_out_of_band=True)
+    assert h_fd.shape == (1, 1)
+    with pytest.warns(UserWarning, match="outside"):
+        res.directivity(0.0, 0.0, f_hi, allow_out_of_band=True)
+
+
+def test_band_check_in_band_and_stored_table_silent(tiny_h5_run):
+    import warnings as _warnings
+
+    path, cfg = tiny_h5_run
+    res = Result(path)
+    f_min, f_max = res.band
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        f_tab, _ = res.z(None)
+        res.z(np.array([f_min, f_max]))
+        res.power(f_tab[::20])
+    assert f_tab.size > 10
 
 
 def test_result_output_shapes(tiny_h5_run):
@@ -236,6 +362,10 @@ def test_clis(patch_few_steps, capsys):
         assert info_main([str(path)]) == 0
         out = capsys.readouterr().out
         assert "tail_db" in out or "S_grid" in out
+        assert "zrad_source: fdtd" in out
+        assert "boxrad_version:" in out
+        assert "/results/zrad:" in out and "points" in out
+        assert "e^{+jωt}" in out
         png = tmp_p / "cli_geom.png"
         cfg_path = Path(__file__).resolve().parents[1] / "configs" / "smoke.json"
         baffle_path = Path(__file__).resolve().parents[1] / "configs" / "c06_baffle.json"

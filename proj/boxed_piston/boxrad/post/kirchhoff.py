@@ -472,6 +472,34 @@ def kh_pressure_loop(
     return out
 
 
+def distance_to_patches(
+    points: np.ndarray,
+    patches: SurfacePatches,
+    *,
+    chunk: int = 64,
+) -> np.ndarray:
+    """Distance (m) from each point to the nearest finite ``h × h`` patch, shape ``(M,)``.
+
+    Each patch is the axis-aligned square of side ``patches.h`` centered on its
+    center in the plane normal to its normal, so points in the plane of a face
+    but beyond its edges get their true distance to the edge.
+    """
+    pts = np.atleast_2d(np.asarray(points, dtype=_F64))
+    centers = patches.centers
+    normals = patches.normals
+    half = 0.5 * float(patches.h)
+    out = np.empty(pts.shape[0], dtype=_F64)
+    for m0 in range(0, pts.shape[0], int(chunk)):
+        m1 = min(m0 + int(chunk), pts.shape[0])
+        rel = pts[m0:m1, np.newaxis, :] - centers[np.newaxis, :, :]
+        d_n = np.sum(rel * normals[np.newaxis, :, :], axis=-1)
+        tang = rel - d_n[..., np.newaxis] * normals[np.newaxis, :, :]
+        excess = np.maximum(np.abs(tang) - half, 0.0)
+        d2 = d_n * d_n + np.sum(excess * excess, axis=-1)
+        out[m0:m1] = np.sqrt(np.min(d2, axis=1))
+    return out
+
+
 def _dist_to_box(point: np.ndarray, cmin: np.ndarray, cmax: np.ndarray) -> float:
     """Unsigned distance from ``point`` to the axis-aligned box [cmin, cmax]."""
     d = np.maximum(cmin - point, np.maximum(point - cmax, 0.0))

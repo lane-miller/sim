@@ -199,7 +199,7 @@ def _dry_run_summary(cfg: Config, derived: Derived) -> dict[str, Any]:
         "decimation_m": m,
         "output_bytes_est": estimate_output_bytes(cfg, derived),
         "wall_time_s_est": _estimate_wall_time_s(derived),
-        "zrad_source": "analytic_baffled" if derived.zrad_fallback else "fdtd",
+        "zrad_source": "fdtd",
         "geometry": cfg.geometry,
     }
     if cfg.geometry == "box" and cfg.box is not None:
@@ -274,7 +274,42 @@ def run(
     stability_interval: int = STABILITY_CHECK_INTERVAL,
     stability_p_max: float = STABILITY_ABS_P_MAX,
 ) -> Path | dict[str, Any]:
-    """Validate config, run FDTD (or dry-run summary), write HDF5 unless ``dry_run``."""
+    """Validate a config, then run the FDTD and write one HDF5 file (or dry-run).
+
+    Warnings from :func:`boxrad.config.validate` are printed to stderr as
+    ``warning: …`` and do not stop the run. After the run, a warning is printed
+    if the radiator-pressure tail is above −60 dB re peak.
+
+    Args:
+        cfg: :class:`~boxrad.config.Config` or path to a JSON config.
+        out_path: HDF5 destination. Default: ``cfg.output.path`` if non-empty,
+            else ``<package root>/outputs/<config stem>.h5`` (``run.h5`` when
+            ``cfg`` is a ``Config`` object). Parent directories are created.
+        dry_run: Only validate and print the derived-parameter summary.
+        progress: Print a progress line about every 2 % of steps.
+        plot: After a full run, open the geometry window (blocks until closed).
+        ram_limit_bytes: Estimated field memory above this is an error
+            (default 5 GiB).
+        stability_interval: Check the pressure field every this many steps.
+        stability_p_max: Abort if ``|p|`` exceeds this (Pa) or is non-finite.
+
+    Returns:
+        Path of the written HDF5 file, or with ``dry_run`` the summary ``dict``
+        (keys ``grid_shape``, ``h`` [m], ``dt`` [s], ``n_steps``, ``f_min_hz``,
+        ``f_max_hz``, ``ppw_realized``, ``cells_across_radiator``,
+        ``memory_bytes``, ``decimation_m``, ``output_bytes_est``,
+        ``wall_time_s_est`` [s], ``zrad_source``, ``geometry``, and in box mode
+        ``box_dims``).
+
+    Raises:
+        ValueError: Config errors, also for ``dry_run`` (missing box, radiator
+            off the face or within ``min_edge_cells`` of an edge, domain above
+            ``numerics.cell_budget``, baffle-mode radiator clipped by more than
+            one cell, memory above the limit, Huygens surface not fitting in the
+            gap, invalid band).
+        RuntimeError: Stability guard tripped; ``/meta`` gets ``aborted=True``
+            and ``aborted_at_step``.
+    """
     cfg_source = cfg
     config = _load_config(cfg)
     if config.geometry == "box" and config.box is None:
@@ -356,7 +391,15 @@ def run(
 
 @contextmanager
 def keep_awake(label: str) -> Generator[None, None, None]:
-    """On macOS, run ``caffeinate -i -w <pid>`` for the wrapped block; no-op elsewhere."""
+    """On macOS, run ``caffeinate -i -w <pid>`` for the wrapped block; no-op elsewhere.
+
+    Prevents idle sleep while the block runs. ``caffeinate`` is stopped on exit,
+    on SIGINT/SIGTERM (then ``SystemExit(128 + signum)``), and at interpreter
+    exit. Start/stop lines are printed with the ``caffeinate`` pid.
+
+    Args:
+        label: Informational only (unused).
+    """
     _ = label
     proc: subprocess.Popen[bytes] | None = None
     pid_printed: int | None = None
@@ -409,6 +452,19 @@ def keep_awake(label: str) -> Generator[None, None, None]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """``boxrad-run CONFIG [-o OUT] [--dry-run] [--no-show] [--plot] [--quiet]``.
+
+    A full run is wrapped in :func:`keep_awake` (``caffeinate`` on macOS). A dry
+    run prints the summary and opens the geometry window unless ``--no-show``.
+    ``--plot`` opens the geometry window from the HDF5 file after a full run.
+
+    Args:
+        argv: Argument list without the program name (default ``sys.argv[1:]``).
+
+    Returns:
+        Exit code: 0 on success, 1 on ``ValueError``/``RuntimeError`` (message
+        printed to stderr as ``error: …``).
+    """
     parser = argparse.ArgumentParser(description="Boxed-piston FDTD run driver")
     parser.add_argument("config", type=Path, help="JSON config path")
     parser.add_argument("-o", "--output", type=Path, default=None, help="HDF5 output path")

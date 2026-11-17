@@ -403,7 +403,7 @@ class Recorder:
         self.t0 = float(derived.pulse_t0)
         self.decim = decimation_factor(derived.f_max, derived.dt)
         self._offset = offset
-        self._zrad_source = "analytic_baffled" if derived.zrad_fallback else "fdtd"
+        self._zrad_source = "fdtd"
 
         assert grid.i_box is not None and grid.j_box is not None and grid.k_box is not None
         ib, jb, kb = grid.i_box, grid.j_box, grid.k_box

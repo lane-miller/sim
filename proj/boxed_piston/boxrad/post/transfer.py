@@ -10,10 +10,9 @@ import numpy as np
 
 from boxrad.post.kirchhoff import (
     SurfacePatches,
-    _dist_to_box,
+    distance_to_patches,
     dpdn_from_vn,
     kh_pressure,
-    kh_pressure_loop,
 )
 from boxrad.post.spectra import spectrum, spectrum_rows
 from boxrad.post.zrad import causal_end_taper
@@ -26,17 +25,9 @@ _C128 = np.complex128
 def min_distance_to_huygens_surface(
     point: np.ndarray, patches: SurfacePatches
 ) -> float:
-    """Unsigned distance (m) from a point to the Huygens patch ensemble."""
+    """Unsigned distance (m) from a point to the nearest finite Huygens patch."""
     pt = np.asarray(point, dtype=_F64).ravel()[:3]
-    rel = pt - patches.centers
-    dist_plane = np.abs(np.sum(rel * patches.normals, axis=1))
-    d_plane = float(np.min(dist_plane))
-    ymin = patches.centers.min(axis=0)
-    ymax = patches.centers.max(axis=0)
-    d_box = _dist_to_box(pt, ymin, ymax)
-    if d_box <= 0.0:
-        return d_plane
-    return float(min(d_plane, d_box))
+    return distance_to_patches(pt[np.newaxis, :], patches)[0].item()
 
 
 def probe_fdtd_pressure_spectrum(
@@ -63,7 +54,12 @@ def kh_huygens_pressure_at_points(
     *,
     geometry: str,
 ) -> np.ndarray:
-    """Exterior KH pressure at points; matches validated box/baffle probe scripts."""
+    """Exterior KH pressure at points; matches validated box/baffle probe scripts.
+
+    Both modes use the chunked, vectorized :func:`kh_pressure` without near-field
+    subdivision; in box mode this equals the reference
+    :func:`~boxrad.post.kirchhoff.kh_pressure_loop` to rounding.
+    """
     pts = np.atleast_2d(np.asarray(points, dtype=_F64))
     omega = np.asarray([2.0 * math.pi * float(f_hz)], dtype=_F64)
     k_sel = np.asarray([2.0 * math.pi * float(f_hz) / float(c)], dtype=_F64)
@@ -71,17 +67,15 @@ def kh_huygens_pressure_at_points(
     vn_face = np.asarray(vn_face, dtype=_C128).ravel()
     dpdn = dpdn_from_vn(vn_face[np.newaxis, :], omega, float(rho))
     p_row = p_face[np.newaxis, :]
-    if geometry == "baffle":
-        return kh_pressure(
-            pts,
-            patches,
-            p_row,
-            dpdn,
-            k_sel,
-            image_plane_z=0.0,
-            near_subdivide=False,
-        )[0]
-    return kh_pressure_loop(pts, patches, p_row, dpdn, k_sel)[0]
+    return kh_pressure(
+        pts,
+        patches,
+        p_row,
+        dpdn,
+        k_sel,
+        image_plane_z=0.0 if geometry == "baffle" else None,
+        near_subdivide=False,
+    )[0]
 
 
 def h_transfer_err(h_ref: complex, h: complex) -> tuple[float, float]:

@@ -28,10 +28,8 @@ A config-driven solver that computes, for **one physical system per run**:
 - **Grid spacing:** default **ppw = 20**, so h = min(λ_min/20, D/10), where D is the radiator diameter (the smallest dimension for non-circular masks). C8-convergence justifies ppw 20 (dispersion order ≈ 2; ≈1% z error at f_max; directivity within 0.1 dB of the extrapolated result at kL = 10). This resolves both the waves and the radiator.
 - **Time step:** Δt = h/(c√3), the CFL limit. Example: at 20 kHz, h ≈ 0.858 mm and Δt ≈ 1.44 µs. f_max is set by h, not by Δt.
 - **Radiator:** a prescribed v_n(t) on face cells, weighted by the area fraction each cell has inside the radiator outline, so the volume velocity is exact (staggered flux ``h² v_z``; weight on the drive, ``Q = h² Σ v_z``, ``S_grid = h² Σ w``). The same weights are used to average pressure (``⟨p⟩ = Σ w p / Σ w``). The radiator face also drives the closed box interior (rear radiation into a sealed rigid cavity); it can't affect the exterior because v_n is prescribed (tested).
-- **Cell-budget fallback:** this applies only when h = D/10 would exceed the cell budget, which happens with tiny radiators on comparatively large boxes, such as mic ports. Then h = λ_min/20 is kept and the radiator spans fewer than 10 cells.
-  - The far field and surface p still come from FDTD; the radiator acts as a near-point source with exact volume velocity.
-  - Z_rad comes from the analytic baffled-piston closed form, (ρc/S)[1 − J₁(2ka)/ka + j·H₁(2ka)/ka]. The output is flagged `zrad_source = "analytic_baffled"` and a console warning states that the box's effect on Re z is neglected (up to 2× when the box is also small). Im z is dominated by the radiator itself and stays reliable.
-- **Config validation:** reject radiators closer than 2–3 cells to any box edge. Tangent radiators are not physical and can't be resolved.
+- **Cell budget:** if the domain at the chosen h exceeds `numerics.cell_budget` (default 6×10⁷ cells), validation fails; this happens with tiny radiators on comparatively large boxes, such as mic ports. There is no coarser fallback and no analytic Z_rad substitute: the error message says to raise h (lower `cells_across_radiator` or `ppw`, or set `h_override`), lower f_max, or raise the budget if RAM allows. z always comes from the FDTD (`zrad_source = "fdtd"`).
+- **Config validation:** reject radiators closer than 2–3 cells to any box edge. Tangent radiators are not physical and can't be resolved. In baffle mode the radiator mask is the radiator bounding box (rounded to cells) shifted by −(x_c, y_c), so an offset clips the outline by max(|x_c| + w/2 − W_bbox/2, |y_c| + h_r/2 − H_bbox/2): a warning up to one cell, an error above.
 - **Excitation:** one band-limited Gaussian velocity pulse per run, with no derivative so there is energy down to DC. Its width is chosen so the spectrum falls to about −40 dB near 1.2·f_max, which keeps out content the grid can't represent. Transfer functions are output spectrum divided by input spectrum.
 - **Run length:** until the response decays below a threshold that accounts for low frequency, typically a few box-transit times plus the pulse length. Example: a 300 mm box needs about 5–10 ms, or 3,000–6,000 steps. Low frequencies come out of the same run, because a box in free space doesn't ring.
 - **Domain:** the box, plus an air gap default 10 cells (C3 passes at 5; margin until box tests C9), plus the CPML. The far field comes from Kirchhoff–Helmholtz over the box faces, so the grid doesn't need to reach the far field.
@@ -45,12 +43,12 @@ A config-driven solver that computes, for **one physical system per run**:
   - Far field / KH uses a **Huygens surface** (C4-kh), not the box faces; box-face p is for surface probes.
 
 ## 3. Software design
-- **Input:** a JSON config with **`geometry`**: `box` (default) or `baffle`. Box mode requires box dimensions; baffle mode uses a half-space rigid plane at z-min (no box, no z-min CPML) with lateral domain sized to the radiator bounding box. Also: radiator shape, size and position, f_min, f_max, tolerances, optional overrides, far-field angle grid, output path. Examples: `configs/default.json`, `configs/smoke.json`, `configs/c06_baffle.json`.
-- **Pre-flight check:** before any computation, `runner.py` prints a summary of the derived parameters and the estimates (cells, RAM, disk, run time), then lists warnings and errors. It waits for confirmation unless `--yes` is passed.
-  - **Errors** (the run stops): a radiator tangent to an edge or within 2–3 cells of one; geometry that doesn't fit the box; the RAM estimate exceeds available memory.
+- **Input:** a JSON config with **`geometry`**: `box` (default) or `baffle`. Box mode requires box dimensions; baffle mode uses a half-space rigid plane at z-min (no box, no z-min CPML) with lateral domain sized to the radiator bounding box. Also: radiator shape, size and position, f_min, f_max, tolerances, optional overrides, far-field angle grid, output path. Examples: `configs/default.json` (box, the C9 geometry with h from the default rules), `configs/smoke.json`, `configs/c06_baffle.json`. Unknown top-level keys (e.g. `"_doc"`) are ignored; unknown keys inside a section are errors.
+- **Pre-flight check:** before any computation, `runner.py` validates the config and prints warnings; any error stops the run (and the dry run) with `error: …`. `--dry-run` then prints a summary of the derived parameters and the estimates (cells, RAM, disk, run time).
+  - **Errors** (the run stops): a radiator tangent to an edge or within 2–3 cells of one; geometry that doesn't fit the box; the domain exceeds the cell budget; a baffle-mode offset clips the radiator by more than one cell; the RAM estimate exceeds available memory.
   - **Warnings** (the run continues):
     - ka > 10 at f_max (beyond the rigid-piston regime);
-    - the cell-budget fallback is active (the radiator spans fewer than 10 cells, so Z_rad is analytic);
+    - a baffle-mode offset (or bounding-box rounding) clips the radiator by up to one cell;
     - points per wavelength below 20 at f_max (dispersion);
     - box dimensions or aspect ratio outside the intended range;
     - the CPML thinner than its default, or the gap smaller than its default;
@@ -63,16 +61,16 @@ A config-driven solver that computes, for **one physical system per run**:
   - the area-weighted, radiator-averaged p(t) at the full step rate;
   - the surface p(t) on all box faces at full spatial resolution, decimated in time only (to about 2.5·f_max, which is lossless within the band); roughly 0.1–2 GB per run;
   - **p** and **v_n** on a Huygens surface offset by **N** cells (default 3, inside the air gap) at the decimated time rate; Huygens face **p** by 4-point cubic interpolation of cell-center **p** along the normal (C4-kh: error ≈ 3(kh)⁴/128); Huygens offset ≥ 2 cells from box and CPML (default 3);
-  - run metadata (h, Δt, number of steps, decimation, run time, peak RAM, `zrad_source`).
+  - run metadata (h, Δt, number of steps, decimation, run time, peak RAM, `zrad_source`, always `fdtd`).
 
   The volume field is not stored. Optional mid-plane snapshots can be saved for debugging. Compression (spatial downsampling, decomposition) comes after the solver is verified.
 - **Post-processing:** a separate module computes:
   - z(f), from the radiator-averaged p(t) and v(t);
   - the far field and near-field probes **outside** the Huygens surface via Kirchhoff–Helmholtz on the stored Huygens **p** and **v_n**; box-surface p is used for on-surface probes only.
 
-  The default far-field output is p at 1 m per 1 m/s radiator velocity, on a full sphere at 5° spacing.
+  The far-field output (`Result.directivity`) is the complex pattern D(θ, φ, f) = lim r·e^{+jkr}·p/v [Pa·m/(m/s)], phase referenced to the origin (radiator center), at any requested directions. The directivity index integrates |D|² over the full sphere in box mode and over the half space z ≥ 0 in baffle mode. Every `Result` method that takes f raises outside [f_min, f_max] unless `allow_out_of_band=True` (then it warns).
 - **Storage:** run outputs go to a configurable path, such as the external SSD, and are excluded from git.
-- **Package `boxrad/`** (install via `pyproject.toml`; `pip install -e .` in `proj/boxed_piston`). Console: `boxrad-run CONFIG [-o OUT] [--dry-run] [--no-show] [--plot] [--quiet]`; geometry: `boxrad-plot CONFIG_OR_H5 [-o PNG] [--no-show] [--huygens]`.
+- **Package `boxrad/`** (install via `pyproject.toml`; `pip install -e .` in `proj/boxed_piston`). Console: `boxrad-run CONFIG [-o OUT] [--dry-run] [--no-show] [--plot] [--quiet]`; geometry: `boxrad-plot CONFIG_OR_H5 [-o PNG] [--no-show] [--huygens]`; `boxrad-info H5` prints the summary, `boxrad_version`, `zrad_source`, the `/results/zrad` range and point count, the conventions, accuracy metadata, and datasets.
 - **Module layout** (one Cursor prompt per module under `boxrad/`, each with a small unit test):
 
   | Module | Contents |
@@ -148,7 +146,7 @@ The pre-flight UI, README and example configs come after Stage D.
 Days 1–3 are the critical path. If they slip, reduce the scope of C9; don't skip verification.
 
 ## 7. Future work
-- **Baffle subtraction for under-resolved radiators.** Run the same radiator mask on the same grid in a half-space with an infinite rigid plane, then take Z = Z_baffled,exact + (Z_FDTD,box − Z_FDTD,baffle), so the grid's self-term error cancels. This would replace the analytic fallback. Non-circular masks need the exact baffled Z from a series solution or a numerical Rayleigh self-impedance integral. The approach is unpublished for this use and needs its own validation test.
+- **Baffle subtraction for under-resolved radiators.** Run the same radiator mask on the same grid in a half-space with an infinite rigid plane, then take Z = Z_baffled,exact + (Z_FDTD,box − Z_FDTD,baffle), so the grid's self-term error cancels. This would allow radiators that are currently rejected by the cell-budget check. Non-circular masks need the exact baffled Z from a series solution or a numerical Rayleigh self-impedance integral. The approach is unpublished for this use and needs its own validation test.
 - **Superposition library.** One run per face patch gives a full column of mutual pressures, so N runs give exact Z and far field for any radiator on that box. That's about 256 runs per box shape at 16×16 patches per quadrant, so it needs a GPU.
 - **Data reduction.** Per-frequency spatial downsampling and decomposition of the stored surface pressure.
 - **Parameter sweeps** across normalized box and radiator shapes, with fitted functions and lookup for acs-lpm. One run per normalized shape covers all physical sizes via kL.
@@ -159,4 +157,4 @@ Days 1–3 are the critical path. If they slip, reduce the scope of C9; don't sk
 - Dispersion (C2-dispersion, PASS): solver matches exact Yee dispersion (mean lag within 5%). At ppw 20 the worst-direction (axis) phase lag is ≈1°/λ, giving ≈35–42° over a 600 mm path at 20 kHz; ≤10° needs ppw ≈ 35–38 (~10–13× cost).
 - Revisit ppw if band-edge dispersion error compounds in downstream (acs-lpm) fits.
 - FDTD radiator-edge reactance error ≈1.5% at 12 cells across the short side (C9); consider raising cells_across_radiator if acs-lpm fits are sensitive.
-- acs-lpm interface needs (frequency grid, angle grid, phase reference): to be specified once single runs are verified.
+- acs-lpm interface needs (frequency grid, angle grid): to be specified with acs-lpm. The directivity phase reference is the origin (radiator center).
