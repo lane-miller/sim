@@ -1,0 +1,6 @@
+boxrad
+
+With the optional `[cad]` extra, boxrad uses Open CASCADE Technology (via the
+cadquery-ocp-novtk bindings), licensed under LGPL-2.1 with the Open CASCADE exception,
+as an unmodified, dynamically loaded library. No Open CASCADE binaries are
+vendored in this repository.

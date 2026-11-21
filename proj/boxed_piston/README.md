@@ -23,7 +23,13 @@ From `sim/`, with Python ≥ 3.11:
 ```bash
 python -m pip install -e proj/boxed_piston            # numpy, scipy, numba, h5py, matplotlib
 python -m pip install -e "proj/boxed_piston[bem]"     # + bempp-cl, only for validation C9
+python -m pip install -e "proj/boxed_piston[geom]"   # parametric geometry (v0.3)
+python -m pip install -e "proj/boxed_piston[cad]"    # + STEP import (OpenCascade)
 ```
+
+Editable installs are local only (this package is not published on PyPI). Dependency
+licenses and the engineering dependency policy are documented in
+[`docs/licenses.md`](docs/licenses.md).
 
 This installs three console commands: `boxrad-run`, `boxrad-info`, and
 `boxrad-plot`.

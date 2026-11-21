@@ -18,6 +18,8 @@ dependencies = [
 
 [project.optional-dependencies]
 bem = ["bempp-cl"]
+geom = ["manifold3d>=3.5.5,<4"]
+cad = ["boxrad[geom]", "cadquery-ocp-novtk>=8.0.1.1,<8.1"]
 
 [project.scripts]
 boxrad-run = "boxrad.runner:main"
