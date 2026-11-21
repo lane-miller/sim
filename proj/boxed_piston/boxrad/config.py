@@ -127,15 +127,23 @@ class Config:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
-        from boxrad.geomconfig import parse_geometry
+        from boxrad.geomconfig import GeometrySpec, parse_geometry
 
         box = None if data.get("box") is None else Box(**data["box"])
+        geometry = data.get("geometry", "box")
         geometry_spec = parse_geometry(data)
+        radiator_raw = data.get("radiator")
+        if radiator_raw is None:
+            if geometry not in ("parametric", "step"):
+                raise ValueError(f"{geometry} geometry requires radiator section")
+            radiator = _radiator_from_geometry_spec(geometry_spec)
+        else:
+            radiator = Radiator(**radiator_raw)
         return cls(
-            geometry=data.get("geometry", "box"),
+            geometry=geometry,
             air=Air(**data.get("air", {})),
             box=box,
-            radiator=Radiator(**data["radiator"]),
+            radiator=radiator,
             band=Band(**data.get("band", {})),
             numerics=Numerics(**data.get("numerics", {})),
             output=Output(**data.get("output", {})),
@@ -436,6 +444,25 @@ def resolve_decimation(
         )
     level_db = worst_huygens_alias_level_db(f_max, sigma, t0, dt, m)
     return m, level_db
+
+
+def _radiator_from_geometry_spec(spec: "GeometrySpec") -> Radiator:
+    """Legacy radiator fields for derive/validate when only ``geometry_spec`` radiators exist."""
+    if not spec.radiators:
+        return Radiator("circle", [0.05])
+    rd = spec.radiators[0]
+    if rd.shape is None:
+        return Radiator("circle", [0.05])
+    sh = rd.shape
+    if sh.kind == "circle":
+        return Radiator("circle", [sh.params["d"]])
+    if sh.kind == "rect":
+        return Radiator("rect", [sh.params["w"], sh.params["h"]])
+    if sh.kind == "racetrack":
+        return Radiator("racetrack", [sh.params["w"], sh.params["h"]])
+    if sh.kind == "ellipse":
+        return Radiator("circle", [2.0 * max(sh.params["a"], sh.params["b"])])
+    return Radiator("circle", [0.05])
 
 
 def _config_dict_for_geometry(cfg: Config) -> dict[str, Any]:

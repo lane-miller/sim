@@ -61,14 +61,27 @@ def test_s2_bookshelf_parse_and_guard() -> None:
     data = json.loads((SHOWCASE / "s2_bookshelf.json").read_text(encoding="utf-8"))
     spec = parse_geometry(data)
     assert spec.tag == "parametric"
-    assert len(spec.parts) == 2
+    assert len(spec.parts) == 1
+    box = spec.parts[0]
+    assert isinstance(box, PrimitiveSpec)
+    assert box.kind == "box"
+    assert np.allclose(
+        [box.params["sx"], box.params["sy"], box.params["sz"]],
+        [0.20, 0.25, 0.30],
+    )
+    assert np.allclose(box.pose.position, [0.0, 0.0, 0.15])
     assert len(spec.radiators) == 2
     woofer, tweeter = spec.radiators
     assert woofer.name == "woofer"
     assert tweeter.name == "tweeter"
-    assert np.allclose(woofer.pose.position, [0.0, 0.125, 0.25])
-    assert np.allclose(tweeter.pose.position, [0.0, 0.125, 0.40])
-    assert spec.environment.planes[0].axis == "z"
+    assert np.allclose(woofer.pose.position, [0.0, 0.125, 0.10])
+    assert np.allclose(tweeter.pose.position, [0.0, 0.125, 0.25])
+    assert np.allclose(woofer.pose.normal, [0.0, 1.0, 0.0])
+    assert np.allclose(tweeter.pose.normal, [0.0, 1.0, 0.0])
+    assert len(spec.environment.planes) == 2
+    floor, wall = spec.environment.planes
+    assert floor.axis == "z" and floor.side == "-" and floor.offset == pytest.approx(0.0)
+    assert wall.axis == "y" and wall.side == "-" and wall.offset == pytest.approx(-0.425)
     with pytest.raises(NotImplementedError, match="step 3"):
         run(Config.from_json(json.dumps(data)), dry_run=True, progress=False)
 
