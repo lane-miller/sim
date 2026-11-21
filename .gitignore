@@ -36,4 +36,5 @@ proj/zrad/**/results/
 .pytest_cache/
 proj/boxed_piston/**/*.h5
 proj/boxed_piston/outputs/
-proj/boxed_piston/validation/results/bem_cache/*.egg-info/
+proj/boxed_piston/validation/results/bem_cache/
+*.egg-info/
