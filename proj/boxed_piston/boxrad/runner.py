@@ -326,6 +326,9 @@ def run(
     """
     cfg_source = cfg
     config = _load_config(cfg)
+    from boxrad.geomconfig import check_geometry_v03_guards
+
+    check_geometry_v03_guards(config)
     if config.geometry == "box" and config.box is None:
         raise ValueError("run requires cfg.box when geometry=box")
 

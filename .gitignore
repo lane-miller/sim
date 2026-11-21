@@ -37,4 +37,6 @@ proj/zrad/**/results/
 proj/boxed_piston/**/*.h5
 proj/boxed_piston/outputs/
 proj/boxed_piston/validation/results/bem_cache/
+proj/boxed_piston/showcase/out/
 *.egg-info/
+!proj/boxed_piston/configs/**/*.json

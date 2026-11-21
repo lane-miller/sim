@@ -1,0 +1,47 @@
+{
+  "_doc": [
+    "Default runnable example: rigid 200 x 150 x 250 mm box (W x H x D), 80 x 60 mm rect radiator offset (+30, +20) mm from the front-face center, band 50-3000 Hz.",
+    "Same geometry as configs/c09_box.json (validation C9) but h comes from the rules: h = min(lambda_min / ppw, D_rad / cells_across_radiator) = 343/3000/20 m (about 5.72 mm).",
+    "Box sides are rounded to whole cells (35 x 26 x 44); the radiator position is not snapped.",
+    "The loader ignores unknown top-level keys such as this one; unknown keys inside a section are errors."
+  ],
+  "geometry": "box",
+  "air": {
+    "c": 343.0,
+    "rho": 1.204
+  },
+  "box": {
+    "W": 0.2,
+    "H": 0.15,
+    "D": 0.25
+  },
+  "radiator": {
+    "shape": "rect",
+    "dims": [0.08, 0.06],
+    "x_c": 0.03,
+    "y_c": 0.02
+  },
+  "band": {
+    "f_min": 50.0,
+    "f_max": 3000.0
+  },
+  "numerics": {
+    "ppw": 20.0,
+    "cells_across_radiator": 10,
+    "cfl_safety": 0.99,
+    "gap_cells": null,
+    "cpml_cells": 16,
+    "cpml_alpha_factor": 1.0,
+    "cpml_m": 3.0,
+    "cpml_R": 1e-6,
+    "cpml_kappa_max": 1.0,
+    "cell_budget": 60000000,
+    "pulse_db": -40.0,
+    "pulse_f_factor": 1.2,
+    "n_transits": 14.0,
+    "min_edge_cells": 3
+  },
+  "output": {
+    "path": ""
+  }
+}

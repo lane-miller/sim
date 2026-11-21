@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from boxrad.geomconfig import GeometrySpec
 
 F_MAX_CAP_HZ = 20_000.0
 # C3-cpml: cpml_cells=16, R=1e-6, m=3, κ_max=1, α_factor=1 (α=π·f_min in derive); gap≥5 cells LF Z.
@@ -15,7 +18,7 @@ DEFAULT_RAM_LIMIT_BYTES = 5 * 1024**3
 SQRT3 = math.sqrt(3.0)
 
 RadiatorShape = Literal["circle", "rect", "racetrack"]
-GeometryMode = Literal["box", "baffle"]
+GeometryMode = Literal["box", "baffle", "parametric", "step"]
 
 
 @dataclass
@@ -108,13 +111,26 @@ class Config:
     band: Band = field(default_factory=Band)
     numerics: Numerics = field(default_factory=Numerics)
     output: Output = field(default_factory=Output)
+    geometry_spec: GeometrySpec | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.geometry_spec is None:
+            from boxrad.geomconfig import parse_geometry
+
+            spec = parse_geometry(_config_dict_for_geometry(self))
+            object.__setattr__(self, "geometry_spec", spec)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("geometry_spec", None)
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
+        from boxrad.geomconfig import parse_geometry
+
         box = None if data.get("box") is None else Box(**data["box"])
+        geometry_spec = parse_geometry(data)
         return cls(
             geometry=data.get("geometry", "box"),
             air=Air(**data.get("air", {})),
@@ -123,6 +139,7 @@ class Config:
             band=Band(**data.get("band", {})),
             numerics=Numerics(**data.get("numerics", {})),
             output=Output(**data.get("output", {})),
+            geometry_spec=geometry_spec,
         )
 
     def to_json(self, **kwargs: Any) -> str:
@@ -421,6 +438,13 @@ def resolve_decimation(
     return m, level_db
 
 
+def _config_dict_for_geometry(cfg: Config) -> dict[str, Any]:
+    """Minimal config dict for :func:`boxrad.geomconfig.parse_geometry`."""
+    d = cfg.to_dict()
+    d["geometry"] = cfg.geometry
+    return d
+
+
 def derive(cfg: Config) -> Derived:
     """Compute derived FDTD parameters from *cfg* (SI units throughout).
 
@@ -453,6 +477,9 @@ def derive(cfg: Config) -> Derived:
       :func:`~boxrad.source.pulse_spectrum`); search capped at the historical
       ``2.5·f_max`` rule. ``decimation_override`` replaces ``m`` (validation).
     """
+    from boxrad.geomconfig import check_geometry_v03_guards
+
+    check_geometry_v03_guards(cfg)
     c = cfg.air.c
     num = cfg.numerics
     gap_cells = DEFAULT_GAP_CELLS if num.gap_cells is None else num.gap_cells

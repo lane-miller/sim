@@ -1,0 +1,40 @@
+{
+  "air": {
+    "c": 343.0,
+    "rho": 1.204
+  },
+  "box": {
+    "W": 0.06,
+    "H": 0.06,
+    "D": 0.05
+  },
+  "radiator": {
+    "shape": "circle",
+    "dims": [0.03],
+    "x_c": 0.0,
+    "y_c": 0.0
+  },
+  "band": {
+    "f_min": 20.0,
+    "f_max": 4000.0
+  },
+  "numerics": {
+    "ppw": 8.0,
+    "cells_across_radiator": 6,
+    "cfl_safety": 0.99,
+    "gap_cells": 8,
+    "cpml_cells": 8,
+    "cpml_alpha_factor": 1.0,
+    "cpml_m": 3.0,
+    "cpml_R": 1e-6,
+    "cpml_kappa_max": 1.0,
+    "cell_budget": 1000000000,
+    "pulse_db": -40.0,
+    "pulse_f_factor": 1.2,
+    "n_transits": 0.08,
+    "min_edge_cells": 3
+  },
+  "output": {
+    "path": ""
+  }
+}
