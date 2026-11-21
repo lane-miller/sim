@@ -1,4 +1,0 @@
-[console_scripts]
-boxrad-info = boxrad.info:main
-boxrad-plot = boxrad.viz:main
-boxrad-run = boxrad.runner:main
