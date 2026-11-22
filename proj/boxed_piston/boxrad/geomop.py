@@ -1,0 +1,198 @@
+"""Assemble :class:`~boxrad.cutkernel.CutOperator` for parametric runs (step 6b1)."""
+
+from __future__ import annotations
+
+import sys
+from typing import Any
+
+import numpy as np
+
+from boxrad.config import Config, Derived
+from boxrad.cutcell import compute_fractions
+from boxrad.cutkernel import (
+    CutOperator,
+    FastRadiator,
+    PatchRadiator,
+    assert_geometry_clear_of_cpml,
+    build_operator,
+)
+from boxrad.geom.geometry import Geometry
+from boxrad.geomderive import GeomGrid, cut_grid
+from boxrad.smallcell import apply_floor, courant_lambda, stability_ok, thin_wall_cells
+
+_F32 = np.float32
+_F64 = np.float64
+
+
+def _axis_aligned_normal(n_hat: np.ndarray) -> tuple[int, float] | None:
+    for a in range(3):
+        if abs(float(n_hat[a])) > 1.0 - 1e-12:
+            return a, float(np.sign(n_hat[a]))
+    return None
+
+
+def _outward_face_index(axis: int, layer: int, s: float) -> int:
+    """Radiator face index: the fluid cell's minus face for n̂=+e_a (index = layer), plus face for n̂=−e_a."""
+    _ = axis
+    return layer if s > 0 else layer + 1
+
+
+def _face_flat_index(axis: int, i: int, j: int, k: int, nx: int, ny: int, nz: int, s: float) -> int:
+    if axis == 0:
+        fi = _outward_face_index(0, i if s > 0 else i, s)
+        if s > 0:
+            fi = i + 1
+        else:
+            fi = i
+        return int(np.ravel_multi_index((fi, j, k), (nx + 1, ny, nz)))
+    if axis == 1:
+        fi = j + 1 if s > 0 else j
+        return int(np.ravel_multi_index((i, fi, k), (nx, ny + 1, nz)))
+    fi = k + 1 if s > 0 else k
+    return int(np.ravel_multi_index((i, j, fi), (nx, ny, nz + 1)))
+
+
+def _fast_path_ok(
+    fr,
+    fractions_axes,
+    nx: int,
+    ny: int,
+    nz: int,
+    axis: int,
+    s: float,
+    cells: np.ndarray,
+    areas: np.ndarray,
+) -> tuple[bool, int | None]:
+    """Single-layer axis-aligned radiator with α = 0 on the solid-backed face."""
+    alpha = fractions_axes[axis]
+    layer_idx: int | None = None
+    for flat, a in zip(cells, areas):
+        if a <= 0.0:
+            continue
+        i = int(flat) // (ny * nz)
+        rem = int(flat) % (ny * nz)
+        j = rem // nz
+        k = rem % nz
+        if axis == 0:
+            key = i
+        elif axis == 1:
+            key = j
+        else:
+            key = k
+        if layer_idx is None:
+            layer_idx = key
+        elif key != layer_idx:
+            return False, None
+        wall_face = key if s > 0 else key + 1
+        if axis == 0:
+            if alpha[wall_face, j, k] > 1e-12:
+                return False, None
+        elif axis == 1:
+            if alpha[i, wall_face, k] > 1e-12:
+                return False, None
+        elif alpha[i, j, wall_face] > 1e-12:
+            return False, None
+    if layer_idx is None:
+        return False, None
+    return True, layer_idx
+
+
+def _build_radiator_0(
+    fr,
+    h: float,
+    nx: int,
+    ny: int,
+    nz: int,
+    geometry: Geometry,
+) -> tuple[str, list[FastRadiator], list[PatchRadiator], float]:
+    rd_geom = geometry.radiators[0]
+    n_hat = rd_geom.pose.R[:, 2]
+    n_hat = n_hat / np.linalg.norm(n_hat)
+    cells = fr.radiator_cell[0]
+    areas = fr.radiator_a[0]
+    S_grid = float(np.sum(areas))
+    h2 = h * h
+    aligned = _axis_aligned_normal(n_hat)
+    fast: list[FastRadiator] = []
+    patch: list[PatchRadiator] = []
+    path = "patch"
+    if aligned is not None:
+        axis, s = aligned
+        ok_fast, layer_idx = _fast_path_ok(fr, fr.alpha, nx, ny, nz, axis, s, cells, areas)
+        if ok_fast and layer_idx is not None:
+            idx_list: list[int] = []
+            sw_list: list[float] = []
+            face_layer = _outward_face_index(axis, layer_idx, s)
+            for flat, a in zip(cells, areas):
+                if a <= 0.0:
+                    continue
+                i = int(flat) // (ny * nz)
+                rem = int(flat) % (ny * nz)
+                j = rem // nz
+                k = rem % nz
+                if axis == 0:
+                    fidx = int(np.ravel_multi_index((face_layer, j, k), (nx + 1, ny, nz)))
+                elif axis == 1:
+                    fidx = int(np.ravel_multi_index((i, face_layer, k), (nx, ny + 1, nz)))
+                else:
+                    fidx = int(np.ravel_multi_index((i, j, face_layer), (nx, ny, nz + 1)))
+                w = float(a) / h2
+                idx_list.append(fidx)
+                sw_list.append(s * w)
+            fast.append(
+                FastRadiator(
+                    axis=axis,
+                    idx=np.asarray(idx_list, dtype=np.int64),
+                    sw=np.asarray(sw_list, dtype=_F32),
+                )
+            )
+            path = "fast"
+            return path, fast, patch, S_grid
+    coef = (areas / h2).astype(_F32)
+    patch.append(PatchRadiator(cells=cells.astype(np.int64), coef=coef))
+    return path, fast, patch, S_grid
+
+
+def build_run_operator(
+    cfg: Config,
+    derived: Derived,
+    gg: GeomGrid,
+    geometry: Geometry,
+) -> tuple[CutOperator, dict[str, Any]]:
+    """Fractions → floor → cut operator; radiator 0 driven, 1…N−1 rigid."""
+    cgrid = cut_grid(gg)
+    fractions = compute_fractions(geometry, cgrid)
+    max_thin = getattr(cfg.numerics, "max_thin_cells", None) or 0
+    _, thin_stats = thin_wall_cells(fractions, geometry, cgrid, max_thin=max_thin)
+    lam = courant_lambda(cfg, derived)
+    beta_tilde, floor_stats = apply_floor(fractions, lam, h=derived.h)
+    ok, _worst = stability_ok(beta_tilde, fractions.alpha, lam)
+    assert ok, "small-cell stability floor violated"
+
+    if len(geometry.radiators) > 1:
+        print(
+            "warning: radiators 1.. held rigid; multi-radiator runs land in step 8",
+            file=sys.stderr,
+        )
+
+    path, fast, patch, s_grid = _build_radiator_0(
+        fractions, derived.h, gg.nx, gg.ny, gg.nz, geometry
+    )
+    op = build_operator(fractions, beta_tilde.astype(_F32), fast, patch, derived.h)
+    assert_geometry_clear_of_cpml(op, gg.cpml_slabs)
+
+    n_closed = (
+        op.closed_faces_x.size + op.closed_faces_y.size + op.closed_faces_z.size
+    )
+    info: dict[str, Any] = {
+        "S_grid": s_grid,
+        "path": path,
+        "fractions_stats": fractions.stats,
+        "floor_stats": floor_stats,
+        "thin_wall_stats": thin_stats,
+        "n_special_cells": int(op.special_cells.size),
+        "n_closed_faces": int(n_closed),
+        "fractions": fractions,
+        "beta_tilde": beta_tilde,
+    }
+    return op, info

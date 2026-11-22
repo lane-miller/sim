@@ -326,6 +326,16 @@ def run(
     """
     cfg_source = cfg
     config = _load_config(cfg)
+
+    if config.geometry == "parametric":
+        if dry_run:
+            from boxrad.geomrun import dry_run_geom
+
+            summary = dry_run_geom(config)
+            _print_dry_run_summary(summary)
+            return summary
+        raise NotImplementedError("parametric recording lands in v0.3 step 6b2")
+
     from boxrad.geomconfig import check_geometry_v03_guards
 
     check_geometry_v03_guards(config)

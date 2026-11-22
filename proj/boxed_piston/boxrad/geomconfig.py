@@ -81,12 +81,17 @@ class GeometrySpec:
 def check_geometry_v03_guards(cfg: Any) -> None:
     """Reject configs whose geometry features land in later v0.3 steps."""
     spec = cfg.geometry_spec
-    if spec.tag not in ("box", "baffle"):
-        raise NotImplementedError("parametric/STEP geometry lands in v0.3 step 3+")
-    if len(spec.radiators) > 1:
-        raise NotImplementedError("multi-radiator lands in v0.3 step 8")
     if spec.environment.planes:
         raise NotImplementedError("environment planes land in v0.3 step 7")
+    if spec.tag == "parametric":
+        return
+    if spec.tag == "step":
+        raise NotImplementedError("parametric/STEP geometry lands in v0.3 step 3+")
+    if spec.tag in ("box", "baffle"):
+        if len(spec.radiators) > 1:
+            raise NotImplementedError("multi-radiator lands in v0.3 step 8")
+        return
+    raise NotImplementedError("parametric/STEP geometry lands in v0.3 step 3+")
 
 
 def _require_positive_finite(d: dict[str, float], *, ctx: str) -> None:

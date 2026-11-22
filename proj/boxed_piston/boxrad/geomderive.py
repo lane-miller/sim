@@ -1,0 +1,273 @@
+"""Parametric-geometry grid derivation (v0.3 step 6b1); mirrors :func:`boxrad.config.derive`."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+from boxrad.config import (
+    CPML_SIDES_ALL,
+    DEFAULT_GAP_CELLS,
+    F_MAX_CAP_HZ,
+    SQRT3,
+    Config,
+    Derived,
+    _memory_bytes,
+    pulse_params,
+    resolve_decimation,
+)
+from boxrad.geom.geometry import Geometry
+from boxrad.grid import build_cpml_slabs
+
+if TYPE_CHECKING:
+    from boxrad.geomconfig import GeometrySpec, ShapeSpec
+
+_F64 = np.float64
+
+
+@dataclass(frozen=True)
+class GeomGrid:
+    """Structured grid for parametric runs (duck-types :class:`~boxrad.grid.Grid` for fields/CPML)."""
+
+    nx: int
+    ny: int
+    nz: int
+    h: float
+    cpml: int
+    x0: np.ndarray
+    cpml_slabs: object
+    cfg: Config
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "x0", np.asarray(self.x0, dtype=_F64).reshape(3))
+
+
+def cut_grid(gg: GeomGrid):
+    """Cut-cell background grid aligned to *gg*."""
+    from boxrad.cutcell import Grid as CutGrid
+
+    return CutGrid(
+        x0=gg.x0,
+        h=gg.h,
+        shape=(gg.nx, gg.ny, gg.nz),
+        rigid_sides={},
+    )
+
+
+def _shape_D(shape: ShapeSpec) -> float:
+    if shape.kind == "circle":
+        return float(shape.params["d"])
+    if shape.kind in ("rect", "racetrack"):
+        return min(float(shape.params["w"]), float(shape.params["h"]))
+    if shape.kind == "ellipse":
+        return 2.0 * min(float(shape.params["a"]), float(shape.params["b"]))
+    raise ValueError(f"unsupported radiator shape kind {shape.kind!r}")
+
+
+def _radiator_D_min(spec: GeometrySpec) -> float:
+    dims = [_shape_D(rd.shape) for rd in spec.radiators if rd.shape is not None]
+    if not dims:
+        raise ValueError("no radiator shapes in geometry_spec")
+    return min(dims)
+
+
+def _snap_bbox(
+    lo: np.ndarray,
+    hi: np.ndarray,
+    h: float,
+    anchors: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    lo_s = np.empty(3, dtype=_F64)
+    hi_s = np.empty(3, dtype=_F64)
+    for a in range(3):
+        anchor = float(anchors[a])
+        lo_s[a] = anchor + math.floor((float(lo[a]) - anchor) / h + 1e-9) * h
+        hi_s[a] = anchor + math.ceil((float(hi[a]) - anchor) / h - 1e-9) * h
+    return lo_s, hi_s
+
+
+def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
+    """Compute derived parameters and a :class:`GeomGrid` from solid bbox and radiator rules."""
+    from boxrad.geomconfig import check_geometry_v03_guards
+
+    check_geometry_v03_guards(cfg)
+    spec = cfg.geometry_spec
+    if spec is None:
+        raise ValueError("derive_geom requires geometry_spec")
+
+    c = cfg.air.c
+    num = cfg.numerics
+    gap_cells = DEFAULT_GAP_CELLS if num.gap_cells is None else num.gap_cells
+    cpml_cells = num.cpml_cells
+
+    D_min = _radiator_D_min(spec)
+    f_ka10 = 10.0 * c / (math.pi * D_min)
+    f_max = cfg.band.f_max if cfg.band.f_max is not None else min(F_MAX_CAP_HZ, f_ka10)
+    lambda_min = c / f_max
+
+    if num.h_override is not None:
+        h = float(num.h_override)
+    else:
+        h = min(lambda_min / num.ppw, D_min / num.cells_across_radiator)
+
+    xlo, ylo, zlo, xhi, yhi, zhi = geometry.solid.bbox
+    lo = np.array([xlo, ylo, zlo], dtype=_F64)
+    hi = np.array([xhi, yhi, zhi], dtype=_F64)
+
+    n_hat = geometry.radiators[0].pose.R[:, 2]
+    n_hat = n_hat / np.linalg.norm(n_hat)
+    pos0 = geometry.radiators[0].pose.position.astype(_F64)
+    anchors = np.empty(3, dtype=_F64)
+    for a in range(3):
+        if abs(float(n_hat[a])) > 1.0 - 1e-12:
+            anchors[a] = float(pos0[a])
+        else:
+            anchors[a] = float(lo[a])
+
+    lo_s, hi_s = _snap_bbox(lo, hi, h, anchors)
+    nbx = max(1, round((hi_s[0] - lo_s[0]) / h))
+    nby = max(1, round((hi_s[1] - lo_s[1]) / h))
+    nbz = max(1, round((hi_s[2] - lo_s[2]) / h))
+    rw, rh, rd = nbx * h, nby * h, nbz * h
+
+    nx = nbx + 2 * gap_cells + 2 * cpml_cells
+    ny = nby + 2 * gap_cells + 2 * cpml_cells
+    nz = nbz + 2 * gap_cells + 2 * cpml_cells
+    total_cells = nx * ny * nz
+    cell_budget_exceeded = total_cells > num.cell_budget
+
+    dt = num.cfl_safety * h / (c * SQRT3)
+    gap_m = gap_cells * h
+    cpml_alpha = num.cpml_alpha_factor * math.pi * cfg.band.f_min
+    memory_bytes = _memory_bytes(nx, ny, nz, cpml_cells)
+
+    _pulse_der = Derived(
+        f_max=f_max,
+        lambda_min=lambda_min,
+        h=h,
+        dt=0.0,
+        realized_W=0.0,
+        realized_H=0.0,
+        realized_D=0.0,
+        radiator_ic=0,
+        radiator_jc=0,
+        box_nx=0,
+        box_ny=0,
+        box_nz=0,
+        gap_cells=0,
+        gap_m=0.0,
+        cpml_cells=0,
+        cpml_alpha=0.0,
+        nx=0,
+        ny=0,
+        nz=0,
+        total_cells=0,
+        memory_bytes=0.0,
+        pulse_sigma=0.0,
+        pulse_t0=0.0,
+        run_time_s=0.0,
+        n_steps=0,
+        ppw_realized=0.0,
+        cpml_sides=CPML_SIDES_ALL,
+        geometry="parametric",
+    )
+    sigma, t0 = pulse_params(cfg, _pulse_der)
+
+    max_dim = max(rw, rh, rd)
+    run_time_s = t0 + 6.0 * sigma + num.n_transits * (max_dim + 2.0 * gap_m) / c
+    n_steps = max(1, math.ceil(run_time_s / dt))
+    ppw_realized = lambda_min / h
+
+    decimation_m, alias_level_db = resolve_decimation(
+        cfg, f_max=f_max, sigma=sigma, t0=t0, dt=dt
+    )
+
+    x0 = lo_s - (gap_cells + cpml_cells) * h
+    slabs = build_cpml_slabs(nx, ny, nz, cpml_cells)
+    gg = GeomGrid(nx=nx, ny=ny, nz=nz, h=h, cpml=cpml_cells, x0=x0, cpml_slabs=slabs, cfg=cfg)
+
+    derived = Derived(
+        f_max=f_max,
+        lambda_min=lambda_min,
+        h=h,
+        dt=dt,
+        realized_W=rw,
+        realized_H=rh,
+        realized_D=rd,
+        radiator_ic=0,
+        radiator_jc=0,
+        box_nx=nbx,
+        box_ny=nby,
+        box_nz=nbz,
+        gap_cells=gap_cells,
+        gap_m=gap_m,
+        cpml_cells=cpml_cells,
+        cpml_alpha=cpml_alpha,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        total_cells=total_cells,
+        memory_bytes=memory_bytes,
+        pulse_sigma=sigma,
+        pulse_t0=t0,
+        run_time_s=run_time_s,
+        n_steps=n_steps,
+        ppw_realized=ppw_realized,
+        cpml_sides=CPML_SIDES_ALL,
+        geometry="parametric",
+        cell_budget_exceeded=cell_budget_exceeded,
+        decimation_m=decimation_m,
+        alias_level_db=alias_level_db,
+    )
+    return derived, gg
+
+
+def validate_geom(
+    cfg: Config,
+    derived: Derived,
+    geometry: Geometry,
+    *,
+    ram_limit_bytes: float | None = None,
+) -> tuple[list[str], list[str]]:
+    """Pre-flight checks for parametric geometry (mirrors :func:`boxrad.config.validate` where applicable)."""
+    from boxrad.config import DEFAULT_RAM_LIMIT_BYTES
+    from boxrad.geom.geometry import clearance_warnings
+
+    if ram_limit_bytes is None:
+        ram_limit_bytes = DEFAULT_RAM_LIMIT_BYTES
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    num = cfg.numerics
+
+    spec = cfg.geometry_spec
+    if spec is not None and spec.environment.planes:
+        errors.append("environment planes land in v0.3 step 7")
+
+    if derived.memory_bytes > ram_limit_bytes:
+        errors.append(
+            f"estimated memory {derived.memory_bytes / 1e9:.2f} GB exceeds "
+            f"limit {ram_limit_bytes / 1e9:.2f} GB"
+        )
+
+    if derived.cell_budget_exceeded:
+        errors.append(
+            f"domain {derived.nx}×{derived.ny}×{derived.nz} = {derived.total_cells:,} cells "
+            f"at h={derived.h * 1e3:.4g} mm exceeds numerics.cell_budget="
+            f"{num.cell_budget:,}; raise h (lower numerics.cells_across_radiator or "
+            f"numerics.ppw, or set numerics.h_override), lower band.f_max, or raise "
+            f"numerics.cell_budget if RAM allows"
+        )
+
+    _ppw_dispersion_ref = 20.0
+    if derived.ppw_realized < _ppw_dispersion_ref - 1e-9:
+        warnings.append(
+            f"realized {derived.ppw_realized:.1f} points per wavelength < "
+            f"default {_ppw_dispersion_ref:g}"
+        )
+
+    warnings.extend(clearance_warnings(geometry, derived.h))
+    return errors, warnings

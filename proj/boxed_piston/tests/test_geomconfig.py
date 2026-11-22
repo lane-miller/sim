@@ -53,8 +53,10 @@ def test_s1_cylinder_parse_and_guard() -> None:
     assert len(spec.radiators) == 1
     assert spec.radiators[0].name == "driver"
     cfg = Config.from_json(json.dumps(data))
-    with pytest.raises(NotImplementedError, match="step 3"):
-        run(cfg, dry_run=True, progress=False)
+    summary = run(cfg, dry_run=True, progress=False)
+    assert isinstance(summary, dict)
+    assert summary.get("geometry") == "parametric"
+    assert "grid_shape" in summary
 
 
 def test_s2_bookshelf_parse_and_guard() -> None:
@@ -82,7 +84,7 @@ def test_s2_bookshelf_parse_and_guard() -> None:
     floor, wall = spec.environment.planes
     assert floor.axis == "z" and floor.side == "-" and floor.offset == pytest.approx(0.0)
     assert wall.axis == "y" and wall.side == "-" and wall.offset == pytest.approx(-0.425)
-    with pytest.raises(NotImplementedError, match="step 3"):
+    with pytest.raises(NotImplementedError, match="step 7"):
         run(Config.from_json(json.dumps(data)), dry_run=True, progress=False)
 
 
