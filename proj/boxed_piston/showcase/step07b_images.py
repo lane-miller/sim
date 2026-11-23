@@ -214,6 +214,8 @@ def gate_c19b(full: Path, half: Path, quarter: Path) -> dict[str, Any]:
     with Result(full) as rf, Result(half) as rh, Result(quarter) as rq:
         for tag, rx in (("half", rh), ("quarter", rq)):
             d_max = h_max = di_max = 0.0
+            n_planes = len(rx.planes)
+            di_plane_db = 10.0 * math.log10(2.0**n_planes)
             for f_hz in freqs:
                 d_f = rf.directivity(th_o.ravel(), ph_o.ravel(), float(f_hz), frame="world")
                 d_x = rx.directivity(th_o.ravel(), ph_o.ravel(), float(f_hz), frame="world")
@@ -223,7 +225,7 @@ def gate_c19b(full: Path, half: Path, quarter: Path) -> dict[str, Any]:
                 h_max = max(h_max, _rel_max(h_f, h_x))
                 di_f = float(rf.directivity_index(float(f_hz), frame="world")[0])
                 di_x = float(rx.directivity_index(float(f_hz), frame="world")[0])
-                di_max = max(di_max, abs(di_f - di_x))
+                di_max = max(di_max, abs((di_x - di_plane_db) - di_f))
             out[tag] = {
                 "directivity_rel_max": float(d_max),
                 "field_rel_max": float(h_max),
@@ -248,7 +250,7 @@ def gate_s2(s2: Path, s2_free: Path) -> dict[str, Any]:
         for f_hz in freqs:
             d_s2 = complex(rp.directivity(0.0, 0.0, f_hz, frame="local")[0, 0])
             d_fr = complex(rf.directivity(0.0, 0.0, f_hz, frame="local")[0, 0])
-            ratio_db = 20.0 * math.log10(abs(d_s2 / max(d_fr, 1e-30)))
+            ratio_db = 20.0 * math.log10(abs(d_s2) / max(abs(d_fr), 1e-30))
             ref_db = _s2_image_on_axis_db(f_hz, d_w)
             di_s2 = float(rp.directivity_index(f_hz, frame="local")[0])
             di_fr = float(rf.directivity_index(f_hz, frame="local")[0])
