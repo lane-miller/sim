@@ -15,6 +15,7 @@ from boxrad.geom.geometry import Geometry
 from boxrad.geomderive import GeomGrid
 from boxrad.grid import Fields
 from boxrad.post.finalize import compute_finalize_results, write_finalize_meta
+from boxrad.post.zrow import write_zrad_row_dataset, zrad_row_at_frequencies
 from boxrad.post.kirchhoff import SurfacePatches, huygens_box_patches
 from boxrad.recorder import (
     _CONVENTIONS,
@@ -342,6 +343,7 @@ class GeomRecorder:
         *,
         offset_cells: int | None = None,
         buffer_samples: int = _BUFFER_SAMPLES,
+        driven: int = 0,
     ) -> None:
         h5 = _require_h5py()
         offset = resolve_huygens_offset(cfg) if offset_cells is None else int(offset_cells)
@@ -364,6 +366,12 @@ class GeomRecorder:
         self.decim = resolve_decimation_factor(cfg, derived)
         self._offset = offset
         self._zrad_source = "fdtd"
+        n_rad = len(geometry.radiators)
+        if not (0 <= driven < n_rad):
+            raise ValueError(f"driven index {driven} out of range for {n_rad} radiators")
+        self._driven = int(driven)
+        self._n_radiators = n_rad
+        self._rad_names = [r.name for r in geometry.radiators]
 
         h = self.h
         gap_cpml = (derived.gap_cells + derived.cpml_cells) * h
@@ -400,23 +408,35 @@ class GeomRecorder:
 
         fractions = op_info["fractions"]
         beta_tilde = op_info["beta_tilde"]
-        rd0 = geometry.radiators[0]
-        n_hat = rd0.pose.R[:, 2].astype(_F64)
-        n_hat = n_hat / max(float(np.linalg.norm(n_hat)), 1e-30)
-        self._n_hat = n_hat
-        cells = fractions.radiator_cell[0]
-        areas = fractions.radiator_a[0].astype(_F64)
-        centroids = fractions.radiator_centroid[0].astype(_F64)
-        h2 = h * h
-        w_c = areas / h2
-        self._rad_p_idx = cells.astype(np.int64)
-        self._rad_w = w_c
-        self._rad_w_sum = float(np.sum(w_c)) if w_c.size else 1.0
-        d_c = np.empty(cells.shape[0], dtype=_F64)
-        for q, flat in enumerate(cells):
-            xc = _cell_center(gg, int(flat))
-            d_c[q] = float(np.dot(xc - centroids[q], n_hat))
-        self._rad_d = d_c
+        self._rad_S = [float(np.sum(fractions.radiator_a[i])) for i in range(n_rad)]
+        self._all_p_idx: list[np.ndarray] = []
+        self._all_w: list[np.ndarray] = []
+        self._all_w_sum: list[float] = []
+        self._all_d: list[np.ndarray] = []
+        self._all_n_hat: list[np.ndarray] = []
+        for ir in range(n_rad):
+            rd_i = geometry.radiators[ir]
+            n_hat_i = rd_i.pose.R[:, 2].astype(_F64)
+            n_hat_i = n_hat_i / max(float(np.linalg.norm(n_hat_i)), 1e-30)
+            cells_i = fractions.radiator_cell[ir]
+            areas_i = fractions.radiator_a[ir].astype(_F64)
+            centroids_i = fractions.radiator_centroid[ir].astype(_F64)
+            h2 = h * h
+            w_c_i = areas_i / h2
+            self._all_p_idx.append(cells_i.astype(np.int64))
+            self._all_w.append(w_c_i)
+            self._all_w_sum.append(float(np.sum(w_c_i)) if w_c_i.size else 1.0)
+            self._all_n_hat.append(n_hat_i)
+            d_c_i = np.empty(cells_i.shape[0], dtype=_F64)
+            for q, flat in enumerate(cells_i):
+                xc = _cell_center(gg, int(flat))
+                d_c_i[q] = float(np.dot(xc - centroids_i[q], n_hat_i))
+            self._all_d.append(d_c_i)
+        self._n_hat = self._all_n_hat[driven]
+        self._rad_p_idx = self._all_p_idx[driven]
+        self._rad_w = self._all_w[driven]
+        self._rad_w_sum = self._all_w_sum[driven]
+        self._rad_d = self._all_d[driven]
 
         probe_targets = self._resolve_probe_targets(cfg)
         self._n_probes = len(probe_targets)
@@ -510,9 +530,16 @@ class GeomRecorder:
         return idx, centers
 
     def _write_static_meta(self, huygens_patches) -> None:
-        rd0 = self.geometry.radiators[0]
-        pose = rd0.pose
+        rd_drv = self.geometry.radiators[self._driven]
+        pose = rd_drv.pose
         meta = self._file.create_group("meta")
+        meta.attrs["schema_version"] = 2
+        meta.attrs["n_radiators"] = int(self._n_radiators)
+        meta.attrs["radiator_names_json"] = json.dumps(self._rad_names)
+        meta.attrs["radiator_S_json"] = json.dumps(self._rad_S)
+        meta.attrs["driven_index"] = int(self._driven)
+        meta.attrs["driven_name"] = str(self._rad_names[self._driven])
+        meta.attrs["mutual_status"] = "recorded_unvalidated"
         meta.attrs["conventions"] = _CONVENTIONS
         meta.attrs["zrad_source"] = self._zrad_source
         meta.attrs["decimation_factor"] = self.decim
@@ -545,6 +572,9 @@ class GeomRecorder:
 
         rad = self._file.create_group("radiator")
         rad.attrs["description"] = "Unit pulse v(t); area-weighted radiator face pressure p_avg"
+        rad.attrs["p_avg_all_note"] = (
+            "columns in config radiator order; velocity correction on driven column only"
+        )
         rad.attrs["times_p_note"] = "t_p = (n+1)·Δt after step(n) (p^{n+1} on grid)"
         rad.attrs["times_v_half_note"] = "t_v = (n+½)·Δt after step(n) (v^{n+½} on grid)"
         rad.attrs["v_pulse_integer_note"] = (
@@ -600,6 +630,9 @@ class GeomRecorder:
         self._ds_v_int = self._create_extensible(rad, "v_pulse_integer", (), _F64, buf)
         self._ds_v_half = self._create_extensible(rad, "v_pulse_half", (), _F64, buf)
         self._ds_p_avg = self._create_extensible(rad, "p_avg", (), _F64, buf)
+        self._ds_p_avg_all = self._create_extensible(
+            rad, "p_avg_all", (self._n_radiators,), _F64, buf
+        )
         self._ds_rad_tp = self._create_extensible(rad, "times_p", (), _F64, buf)
         self._ds_rad_tv = self._create_extensible(rad, "times_v_half", (), _F64, buf)
 
@@ -622,6 +655,7 @@ class GeomRecorder:
         self._w_v_int = _ChunkWriter(self._ds_v_int, buf)
         self._w_v_half = _ChunkWriter(self._ds_v_half, buf)
         self._w_p_avg = _ChunkWriter(self._ds_p_avg, buf)
+        self._w_p_avg_all = _ChunkWriter(self._ds_p_avg_all, buf)
         self._w_rad_tp = _ChunkWriter(self._ds_rad_tp, buf)
         self._w_rad_tv = _ChunkWriter(self._ds_rad_tv, buf)
         self._w_h_p = _ChunkWriter(self._ds_h_p, buf)
@@ -641,15 +675,30 @@ class GeomRecorder:
     def _time_v_after_step(self, n: int) -> float:
         return (float(n) + 0.5) * self.dt
 
-    def _radiator_p_avg(self, p_flat: np.ndarray, n: int) -> float:
-        if self._rad_p_idx.size == 0:
+    def _radiator_p_avg_one(self, p_flat: np.ndarray, n: int, ir: int) -> float:
+        idx = self._all_p_idx[ir]
+        if idx.size == 0:
             return 0.0
-        t_p = self._time_p_after_step(n)
-        dvdt = velocity_pulse_derivative(t_p, self.sigma, self.t0)
-        pc = p_flat[self._rad_p_idx].astype(_F64)
-        corr = self.rho * self._rad_d * self._rad_w * dvdt
-        p_face = pc + corr
-        return float(np.sum(self._rad_w * p_face) / self._rad_w_sum)
+        w_c = self._all_w[ir]
+        w_sum = self._all_w_sum[ir]
+        pc = p_flat[idx].astype(_F64)
+        if ir == self._driven:
+            t_p = self._time_p_after_step(n)
+            dvdt = velocity_pulse_derivative(t_p, self.sigma, self.t0)
+            corr = self.rho * self._all_d[ir] * w_c * dvdt
+            p_face = pc + corr
+        else:
+            p_face = pc
+        return float(np.sum(w_c * p_face) / w_sum)
+
+    def _radiator_p_avg(self, p_flat: np.ndarray, n: int) -> float:
+        return self._radiator_p_avg_one(p_flat, n, self._driven)
+
+    def _radiator_p_avg_all(self, p_flat: np.ndarray, n: int) -> np.ndarray:
+        out = np.empty(self._n_radiators, dtype=_F64)
+        for ir in range(self._n_radiators):
+            out[ir] = self._radiator_p_avg_one(p_flat, n, ir)
+        return out
 
     def _huygens_p(self, p_flat: np.ndarray) -> np.ndarray:
         samples = p_flat[self._huygens_idx4].astype(_F64)
@@ -678,6 +727,7 @@ class GeomRecorder:
         self._w_v_int.append(v_at_p)
         self._w_v_half.append(float(v_half))
         self._w_p_avg.append(self._radiator_p_avg(p_flat, n))
+        self._w_p_avg_all.append(self._radiator_p_avg_all(p_flat, n))
         self._w_rad_tp.append(t_p)
         self._w_rad_tv.append(t_v)
 
@@ -700,6 +750,7 @@ class GeomRecorder:
             self._w_v_int,
             self._w_v_half,
             self._w_p_avg,
+            self._w_p_avg_all,
             self._w_rad_tp,
             self._w_rad_tv,
             self._w_h_p,
@@ -736,12 +787,27 @@ class GeomRecorder:
             with h5.File(self._path, "r") as f_read:
                 p_avg_full = np.asarray(f_read["radiator/p_avg"][()], dtype=_F64)
 
+        p_avg_all_full: np.ndarray
         with h5.File(self._path, "r") as f_read:
+            p_avg_all_full = np.asarray(
+                f_read["radiator/p_avg_all"][()], dtype=_F64
+            )
+            times_p = np.asarray(f_read["radiator/times_p"][()], dtype=_F64)
+            derived_blob = json.loads(
+                bytes(f_read["meta/derived_json"][()]).decode("utf-8")
+            )
             tail_db, f_log, z_log = compute_finalize_results(
                 f_read,
                 self.cfg,
                 self.derived,
                 p_avg=p_avg_full,
+            )
+            z_row = zrad_row_at_frequencies(
+                p_avg_all_full,
+                times_p,
+                f_log,
+                self.cfg,
+                derived_blob,
             )
         with h5.File(self._path, "a") as f_append:
             write_finalize_meta(
@@ -752,6 +818,7 @@ class GeomRecorder:
                 f_log=f_log,
                 z_log=z_log,
             )
+            write_zrad_row_dataset(f_append["results"], f_log, z_row)
             f_append["meta"].attrs["conventions"] = _WORLD_CONVENTIONS
         self._tail_db = float(tail_db)
         self._closed = True

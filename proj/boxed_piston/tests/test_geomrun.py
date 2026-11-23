@@ -185,14 +185,12 @@ def test_simulate_300_steps(name: str, path_kind: str, sign: int) -> None:
         assert np.all(sw <= 0) if sign < 0 else np.all(sw >= 0)
 
 
-def test_dry_run_showcases(capsys: pytest.CaptureFixture[str]) -> None:
+def test_dry_run_showcases() -> None:
     s1 = dry_run_geom(_load_showcase("s1_cylinder.json"))
     assert s1["radiator_path"] == "fast"
     s4 = dry_run_geom(_load_showcase("s4_tilted.json"))
     assert s4["radiator_path"] == "patch"
     dry_run_geom(_load_showcase("s5_platform.json"))
-    err = capsys.readouterr().err
-    assert "held rigid" in err
     s6 = dry_run_geom(_load_showcase("s6_downfire.json"))
     assert s6["clearances_m"].get("woofer", 0.0) == pytest.approx(0.030, rel=0.02)
     s2 = dry_run_geom(_load_showcase("s2_bookshelf.json"))

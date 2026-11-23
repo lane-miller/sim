@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import sys
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from boxrad.config import Config, Derived
-from boxrad.cutcell import compute_fractions
+from boxrad.cutcell import Fractions, compute_fractions
 from boxrad.cutkernel import CutOperator, FastRadiator, PatchRadiator, build_operator
 from boxrad.grid import CpmlSlabs
 from boxrad.geom.geometry import Geometry
@@ -17,6 +17,16 @@ from boxrad.smallcell import apply_floor, courant_lambda, stability_ok, thin_wal
 
 _F32 = np.float32
 _F64 = np.float64
+
+
+@dataclass
+class GeomOpCache:
+    """Fractions and floored β̃ reused across multi-radiator runs (step 8a)."""
+
+    fractions: Fractions
+    beta_tilde: np.ndarray
+    floor_stats: dict[str, Any]
+    thin_stats: dict[str, Any]
 
 
 def _axis_aligned_normal(n_hat: np.ndarray) -> tuple[int, float] | None:
@@ -92,19 +102,20 @@ def _fast_path_ok(
     return True, layer_idx
 
 
-def _build_radiator_0(
-    fr,
+def _build_radiator(
+    j: int,
+    fr: Fractions,
     h: float,
     nx: int,
     ny: int,
     nz: int,
     geometry: Geometry,
 ) -> tuple[str, list[FastRadiator], list[PatchRadiator], float]:
-    rd_geom = geometry.radiators[0]
+    rd_geom = geometry.radiators[j]
     n_hat = rd_geom.pose.R[:, 2]
     n_hat = n_hat / np.linalg.norm(n_hat)
-    cells = fr.radiator_cell[0]
-    areas = fr.radiator_a[0]
+    cells = fr.radiator_cell[j]
+    areas = fr.radiator_a[j]
     S_grid = float(np.sum(areas))
     h2 = h * h
     aligned = _axis_aligned_normal(n_hat)
@@ -123,14 +134,14 @@ def _build_radiator_0(
                     continue
                 i = int(flat) // (ny * nz)
                 rem = int(flat) % (ny * nz)
-                j = rem // nz
+                jk = rem // nz
                 k = rem % nz
                 if axis == 0:
-                    fidx = int(np.ravel_multi_index((face_layer, j, k), (nx + 1, ny, nz)))
+                    fidx = int(np.ravel_multi_index((face_layer, jk, k), (nx + 1, ny, nz)))
                 elif axis == 1:
                     fidx = int(np.ravel_multi_index((i, face_layer, k), (nx, ny + 1, nz)))
                 else:
-                    fidx = int(np.ravel_multi_index((i, j, face_layer), (nx, ny, nz + 1)))
+                    fidx = int(np.ravel_multi_index((i, jk, face_layer), (nx, ny, nz + 1)))
                 w = float(a) / h2
                 idx_list.append(fidx)
                 sw_list.append(s * w)
@@ -146,6 +157,29 @@ def _build_radiator_0(
     coef = (areas / h2).astype(_F32)
     patch.append(PatchRadiator(cells=cells.astype(np.int64), coef=coef))
     return path, fast, patch, S_grid
+
+
+def build_geom_op_cache(
+    cfg: Config,
+    derived: Derived,
+    gg: GeomGrid,
+    geometry: Geometry,
+) -> GeomOpCache:
+    """One-shot fractions + floor for reuse across ``driven`` runs."""
+    cgrid = cut_grid(gg)
+    fractions = compute_fractions(geometry, cgrid)
+    max_thin = getattr(cfg.numerics, "max_thin_cells", None) or 0
+    _, thin_stats = thin_wall_cells(fractions, geometry, cgrid, max_thin=max_thin)
+    lam = courant_lambda(cfg, derived)
+    beta_tilde, floor_stats = apply_floor(fractions, lam, h=derived.h)
+    ok, _worst = stability_ok(beta_tilde, fractions.alpha, lam)
+    assert ok, "small-cell stability floor violated"
+    return GeomOpCache(
+        fractions=fractions,
+        beta_tilde=beta_tilde,
+        floor_stats=floor_stats,
+        thin_stats=thin_stats,
+    )
 
 
 def _assert_geometry_clear_of_cpml_sides(
@@ -206,25 +240,23 @@ def build_run_operator(
     derived: Derived,
     gg: GeomGrid,
     geometry: Geometry,
+    *,
+    driven: int = 0,
+    cache: GeomOpCache | None = None,
 ) -> tuple[CutOperator, dict[str, Any]]:
-    """Fractions → floor → cut operator; radiator 0 driven, 1…N−1 rigid."""
-    cgrid = cut_grid(gg)
-    fractions = compute_fractions(geometry, cgrid)
-    max_thin = getattr(cfg.numerics, "max_thin_cells", None) or 0
-    _, thin_stats = thin_wall_cells(fractions, geometry, cgrid, max_thin=max_thin)
-    lam = courant_lambda(cfg, derived)
-    beta_tilde, floor_stats = apply_floor(fractions, lam, h=derived.h)
-    ok, _worst = stability_ok(beta_tilde, fractions.alpha, lam)
-    assert ok, "small-cell stability floor violated"
+    """Fractions → floor → cut operator; radiator ``driven`` driven, others rigid."""
+    n_rad = len(geometry.radiators)
+    if not (0 <= driven < n_rad):
+        raise ValueError(f"driven index {driven} out of range for {n_rad} radiators")
+    if cache is None:
+        cache = build_geom_op_cache(cfg, derived, gg, geometry)
+    fractions = cache.fractions
+    beta_tilde = cache.beta_tilde
+    thin_stats = cache.thin_stats
+    floor_stats = cache.floor_stats
 
-    if len(geometry.radiators) > 1:
-        print(
-            "warning: radiators 1.. held rigid; multi-radiator runs land in step 8",
-            file=sys.stderr,
-        )
-
-    path, fast, patch, s_grid = _build_radiator_0(
-        fractions, derived.h, gg.nx, gg.ny, gg.nz, geometry
+    path, fast, patch, s_grid = _build_radiator(
+        driven, fractions, derived.h, gg.nx, gg.ny, gg.nz, geometry
     )
     op = build_operator(fractions, beta_tilde.astype(_F32), fast, patch, derived.h)
     _assert_geometry_clear_of_cpml_sides(op, gg.cpml_slabs, derived.cpml_sides)
@@ -242,5 +274,7 @@ def build_run_operator(
         "n_closed_faces": int(n_closed),
         "fractions": fractions,
         "beta_tilde": beta_tilde,
+        "driven": driven,
+        "op_cache": cache,
     }
     return op, info

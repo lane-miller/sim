@@ -86,6 +86,7 @@ class Numerics:
     alias_rejection_db: float = 100.0
     n_transits: float = 3.0
     min_edge_cells: int = 3
+    drive_radiators: list[str] | None = None  # parametric: subset to drive; default all
 
 
 @dataclass

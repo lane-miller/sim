@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -14,7 +15,7 @@ from boxrad.cpml import make_cpml_state
 from boxrad.cutkernel import CutOperator, step_cut
 from boxrad.geom.geometry import Geometry, build_geometry, radiator_clearance
 from boxrad.geomderive import GeomGrid, derive_geom, validate_geom
-from boxrad.geomop import build_run_operator
+from boxrad.geomop import GeomOpCache, build_geom_op_cache, build_run_operator
 from boxrad.grid import Fields, allocate_fields
 from boxrad.kernels import UpdateCoeffs, make_update_coeffs
 from boxrad.runner import (
@@ -58,7 +59,37 @@ def _print_warnings(warnings: list[str]) -> None:
         print(f"warning: {msg}", file=sys.stderr)
 
 
-def prepare_geom_run(cfg: Config) -> GeomRun:
+def resolve_drive_indices(cfg: Config) -> list[int]:
+    """Radiator indices to drive, in config order; radiator 0 is always included."""
+    spec = cfg.geometry_spec
+    if spec is None or not spec.radiators:
+        return [0]
+    names = [r.name for r in spec.radiators]
+    n_rad = len(names)
+    requested = cfg.numerics.drive_radiators
+    if requested is None:
+        return list(range(n_rad))
+    name_to_idx = {nm: i for i, nm in enumerate(names)}
+    chosen: set[int] = set()
+    for nm in requested:
+        if nm not in name_to_idx:
+            raise ValueError(f"unknown drive_radiators name {nm!r}")
+        chosen.add(name_to_idx[nm])
+    if 0 not in chosen:
+        print(
+            "note: radiator 0 added to numerics.drive_radiators",
+            file=sys.stderr,
+        )
+        chosen.add(0)
+    return [i for i in range(n_rad) if i in chosen]
+
+
+def prepare_geom_run(
+    cfg: Config,
+    *,
+    driven: int = 0,
+    cache: GeomOpCache | None = None,
+) -> GeomRun:
     geometry = build_geometry(cfg)
     if geometry is None:
         raise ValueError("prepare_geom_run requires parametric geometry")
@@ -70,7 +101,9 @@ def prepare_geom_run(cfg: Config) -> GeomRun:
     fields = allocate_fields(gg)
     coeffs = make_update_coeffs(cfg.air.rho, cfg.air.c, derived.h, derived.dt)
     cpml = make_cpml_state(gg, cfg, derived, derived.dt)
-    op, info = build_run_operator(cfg, derived, gg, geometry)
+    op, info = build_run_operator(
+        cfg, derived, gg, geometry, driven=driven, cache=cache
+    )
     sigma = derived.pulse_sigma
     t0 = derived.pulse_t0
     return GeomRun(
@@ -117,7 +150,25 @@ def simulate_geom(
     return run
 
 
-def dry_run_geom(cfg: Config) -> dict[str, Any]:
+def multirad_output_basename(base: Path, j: int, rad_name: str) -> str | None:
+    """Sibling HDF5 basename for radiator *j*; ``None`` if not a driven run in the set."""
+    import re
+
+    if j == 0:
+        return base.name
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", rad_name)
+    return f"{base.stem}.r{j}_{safe}{base.suffix}"
+
+
+def multirad_output_path(base: Path, j: int, rad_name: str) -> Path:
+    if j == 0:
+        return base
+    name = multirad_output_basename(base, j, rad_name)
+    assert name is not None
+    return base.parent / name
+
+
+def dry_run_geom(cfg: Config, *, out_path: Path | None = None) -> dict[str, Any]:
     geometry = build_geometry(cfg)
     if geometry is None:
         raise ValueError("dry_run_geom requires parametric geometry")
@@ -125,7 +176,9 @@ def dry_run_geom(cfg: Config) -> dict[str, Any]:
     errors, warnings = validate_geom(cfg, derived, geometry)
     if errors:
         raise ValueError("; ".join(errors))
-    _, info = build_run_operator(cfg, derived, gg, geometry)
+    cache = build_geom_op_cache(cfg, derived, gg, geometry)
+    drive = resolve_drive_indices(cfg)
+    _, info = build_run_operator(cfg, derived, gg, geometry, driven=drive[0], cache=cache)
     _print_warnings(warnings)
 
     m = resolve_decimation_factor(cfg, derived)
@@ -141,6 +194,19 @@ def dry_run_geom(cfg: Config) -> dict[str, Any]:
         if np.isfinite(cmin):
             clearances[rd.name] = float(cmin)
 
+    n_runs = len(drive)
+    per_wall = _estimate_wall_time_s(derived)
+    per_bytes = estimate_output_bytes(cfg, derived)
+    names = [r.name for r in geometry.radiators]
+    n_rad = len(names)
+    base = out_path or Path("out.h5")
+    run_files: list[str | None] = [None] * n_rad
+    planned: list[str] = []
+    for j in drive:
+        bn = multirad_output_basename(base, j, names[j])
+        if bn is not None:
+            planned.append(bn)
+        run_files[j] = bn
     return {
         "grid_shape": (derived.nx, derived.ny, derived.nz),
         "h": derived.h,
@@ -154,8 +220,8 @@ def dry_run_geom(cfg: Config) -> dict[str, Any]:
         "decimation_m": m,
         "f_nyquist_decimated_hz": f_nyq,
         "alias_level_db": derived.alias_level_db,
-        "output_bytes_est": estimate_output_bytes(cfg, derived),
-        "wall_time_s_est": _estimate_wall_time_s(derived),
+        "output_bytes_est": per_bytes,
+        "wall_time_s_est": per_wall,
         "zrad_source": "fdtd",
         "geometry": cfg.geometry,
         "S_grid": info["S_grid"],
@@ -167,4 +233,12 @@ def dry_run_geom(cfg: Config) -> dict[str, Any]:
         "warnings": list(warnings),
         "n_special_cells": info["n_special_cells"],
         "n_closed_faces": info["n_closed_faces"],
+        "n_runs": n_runs,
+        "wall_time_s_est_per_run": per_wall,
+        "wall_time_s_est_total": per_wall * n_runs,
+        "output_bytes_est_per_run": per_bytes,
+        "output_bytes_est_total": per_bytes * n_runs,
+        "planned_output_files": planned,
+        "drive_indices": drive,
+        "run_files_json_preview": run_files,
     }

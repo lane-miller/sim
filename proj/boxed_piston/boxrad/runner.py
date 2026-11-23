@@ -253,6 +253,31 @@ def _stability_failed(p: np.ndarray, p_max: float) -> bool:
     return p_abs > p_max
 
 
+def _progress_tick_prefixed(
+    prefix: str,
+    n: int,
+    n_steps: int,
+    dt: float,
+    t_start: float,
+    *,
+    last_pct: int,
+) -> int:
+    if n_steps <= 0:
+        return last_pct
+    pct = int(100 * (n + 1) / n_steps)
+    if pct < last_pct + 2 and n + 1 < n_steps:
+        return last_pct
+    elapsed = time.perf_counter() - t_start
+    sim_t = (n + 1) * dt
+    rate = (n + 1) / elapsed if elapsed > 0 else 0.0
+    eta = (n_steps - n - 1) / rate if rate > 0 else float("inf")
+    print(
+        f"{prefix}step {n + 1}/{n_steps}  t={sim_t:.4e} s  "
+        f"elapsed={elapsed:.1f} s  ETA={eta:.1f} s  {rate:.1f} steps/s"
+    )
+    return pct
+
+
 def _progress_tick(
     n: int,
     n_steps: int,
@@ -328,73 +353,137 @@ def run(
     config = _load_config(cfg)
 
     if config.geometry == "parametric":
-        if dry_run:
-            from boxrad.geomrun import dry_run_geom
-
-            summary = dry_run_geom(config)
-            _print_dry_run_summary(summary)
-            return summary
-
-        from boxrad.geomrec import GeomRecorder
-        from boxrad.geomrun import prepare_geom_run, step_geom
-
-        run = prepare_geom_run(config)
-        _check_memory(run.derived, ram_limit_bytes)
+        from boxrad.geomrun import (
+            dry_run_geom,
+            multirad_output_path,
+            prepare_geom_run,
+            resolve_drive_indices,
+            step_geom,
+        )
 
         dest = _resolve_out_path(config, cfg_source, Path(out_path) if out_path else None)
-        dest.parent.mkdir(parents=True, exist_ok=True)
 
-        rec: GeomRecorder | None = None
-        aborted_step: int | None = None
+        if dry_run:
+            summary = dry_run_geom(config, out_path=dest)
+            _print_dry_run_summary(summary)
+            if "n_runs" in summary:
+                print(f"  n_runs: {summary['n_runs']}")
+                print(
+                    f"  wall_time_s_est_per_run: "
+                    f"{_sigfig4(summary['wall_time_s_est_per_run'])} s"
+                )
+                print(f"  wall_time_s_est_total: {_sigfig4(summary['wall_time_s_est_total'])} s")
+                print(
+                    f"  output_bytes_est_per_run: "
+                    f"{_sigfig4(summary['output_bytes_est_per_run'] / 1e6)} MB (approx.)"
+                )
+                print(
+                    f"  output_bytes_est_total: "
+                    f"{_sigfig4(summary['output_bytes_est_total'] / 1e6)} MB (approx.)"
+                )
+                print(f"  planned_output_files: {summary['planned_output_files']}")
+            return summary
+
+        from boxrad.geom.geometry import build_geometry
+        from boxrad.geomderive import derive_geom, validate_geom
+        from boxrad.geomop import GeomOpCache
+        from boxrad.geomrec import GeomRecorder
+
+        geometry = build_geometry(config)
+        if geometry is None:
+            raise ValueError("parametric run requires buildable geometry")
+        derived, _gg = derive_geom(config, geometry)
+
+        errors, warnings = validate_geom(config, derived, geometry)
+        _print_warnings(warnings)
+        if errors:
+            raise ValueError("; ".join(errors))
+        _check_memory(derived, ram_limit_bytes)
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        drive = resolve_drive_indices(config)
+        names = [r.name for r in geometry.radiators]
+        n_rad = len(names)
+        k_total = len(drive)
+        cache: GeomOpCache | None = None
         tail_db: float | None = None
-        t_wall_start = time.perf_counter()
-        last_pct = -2
-        try:
-            rec = GeomRecorder(
-                config,
-                run.derived,
-                run.gg,
-                run.geometry,
-                run.info,
-                dest,
-            )
-            n_steps = run.derived.n_steps
-            for n in range(n_steps):
-                step_geom(run, n)
-                rec.sample(run.fields, n)
-                if progress:
-                    last_pct = _progress_tick(
-                        n, n_steps, run.derived.dt, t_wall_start, last_pct=last_pct
-                    )
-                if (n + 1) % stability_interval == 0 or n + 1 == n_steps:
-                    if _stability_failed(run.fields.p, stability_p_max):
-                        aborted_step = n
-                        raise RuntimeError(
-                            f"stability guard failed at step {n} "
-                            f"(non-finite p or |p| > {stability_p_max:.3g})"
+
+        for k, j in enumerate(drive):
+            run = prepare_geom_run(config, driven=j, cache=cache)
+            if cache is None:
+                cache = run.info["op_cache"]
+            run_dest = multirad_output_path(dest, j, names[j])
+            rec: GeomRecorder | None = None
+            aborted_step: int | None = None
+            t_wall_start = time.perf_counter()
+            last_pct = -2
+            prefix = f"run {k + 1}/{k_total} ({names[j]}) "
+            try:
+                rec = GeomRecorder(
+                    config,
+                    run.derived,
+                    run.gg,
+                    run.geometry,
+                    run.info,
+                    run_dest,
+                    driven=j,
+                )
+                n_steps = run.derived.n_steps
+                for n in range(n_steps):
+                    step_geom(run, n)
+                    rec.sample(run.fields, n)
+                    if progress:
+                        last_pct = _progress_tick_prefixed(
+                            prefix,
+                            n,
+                            n_steps,
+                            run.derived.dt,
+                            t_wall_start,
+                            last_pct=last_pct,
                         )
-        except RuntimeError:
-            if rec is not None and rec._file is not None and aborted_step is not None:
-                meta = rec._file["meta"]
-                meta.attrs["aborted"] = True
-                meta.attrs["aborted_at_step"] = aborted_step
-            raise
-        finally:
-            if rec is not None:
-                wall_s = time.perf_counter() - t_wall_start
-                if rec._file is not None:
+                    if (n + 1) % stability_interval == 0 or n + 1 == n_steps:
+                        if _stability_failed(run.fields.p, stability_p_max):
+                            aborted_step = n
+                            raise RuntimeError(
+                                f"stability guard failed at step {n} "
+                                f"(non-finite p or |p| > {stability_p_max:.3g})"
+                            )
+            except RuntimeError:
+                if rec is not None and rec._file is not None and aborted_step is not None:
                     meta = rec._file["meta"]
-                    meta.attrs["wall_time_s"] = wall_s
-                    meta.attrs["numba_num_threads"] = _numba_thread_count()
-                    meta.attrs["git_commit"] = _git_commit_hash()
-                rec.close()
-                tail_db = rec._tail_db
-        if tail_db is not None and tail_db > -60.0:
-            print(
-                f"warning: p_avg tail {tail_db:.1f} dB re peak (> −60 dB); "
-                "increase numerics.n_transits",
-                file=sys.stderr,
-            )
+                    meta.attrs["aborted"] = True
+                    meta.attrs["aborted_at_step"] = aborted_step
+                raise
+            finally:
+                if rec is not None:
+                    wall_s = time.perf_counter() - t_wall_start
+                    if rec._file is not None:
+                        meta = rec._file["meta"]
+                        meta.attrs["wall_time_s"] = wall_s
+                        meta.attrs["numba_num_threads"] = _numba_thread_count()
+                        meta.attrs["git_commit"] = _git_commit_hash()
+                    rec.close()
+                    tail_db = rec._tail_db
+            if tail_db is not None and tail_db > -60.0:
+                print(
+                    f"warning: {names[j]} p_avg tail {tail_db:.1f} dB re peak (> −60 dB); "
+                    "increase numerics.n_transits",
+                    file=sys.stderr,
+                )
+
+        import json
+
+        try:
+            import h5py
+        except ImportError as exc:
+            raise ImportError("h5py required to write run_files_json") from exc
+
+        run_files: list[str | None] = [None] * n_rad
+        for j in drive:
+            run_files[j] = multirad_output_path(dest, j, names[j]).name
+        with h5py.File(dest, "a") as f_out:
+            f_out["meta"].attrs["run_files_json"] = json.dumps(run_files)
+
         if plot:
             print(
                 "plot not available for parametric geometry yet",
