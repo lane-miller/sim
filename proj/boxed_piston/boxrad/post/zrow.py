@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from boxrad.config import Config
 from boxrad.post.zrad import _z_from_traces
+
+try:
+    import h5py
+except ImportError:  # pragma: no cover
+    h5py = None  # type: ignore[assignment]
+
+
+def _require_h5py() -> Any:
+    if h5py is None:
+        raise ImportError("h5py is required for boxrad.post.zrow")
+    return h5py
 
 _F64 = np.float64
 _C128 = np.complex128
@@ -56,6 +69,36 @@ def zrad_row_at_frequencies(
         )
         out[:, col] = z_col
     return out
+
+
+def zrow_at_frequencies(
+    path: str | Path,
+    f_hz: np.ndarray,
+    *,
+    use_taper: bool = True,
+    time_shift_s: float = 0.0,
+) -> np.ndarray:
+    """Dimensionless mutual row ``z_ij(f)`` shape ``(F, N)`` at explicit frequencies.
+
+    Column *i* is the pickup on radiator *i* while the file's ``driven_index`` drives.
+    Uses the same discrete spectral estimate as :mod:`boxrad.post.zrad`.
+    """
+    path = Path(path)
+    h5 = _require_h5py()
+    with h5.File(path, "r") as f:
+        p_avg_all = np.asarray(f["radiator/p_avg_all"][()], dtype=_F64)
+        times = np.asarray(f["radiator/times_p"][()], dtype=_F64)
+        cfg = Config.from_json(bytes(f["meta/config_json"][()]).decode("utf-8"))
+        derived = json.loads(bytes(f["meta/derived_json"][()]).decode("utf-8"))
+    return zrad_row_at_frequencies(
+        p_avg_all,
+        times,
+        f_hz,
+        cfg,
+        derived,
+        use_taper=use_taper,
+        time_shift_s=time_shift_s,
+    )
 
 
 def write_zrad_row_dataset(

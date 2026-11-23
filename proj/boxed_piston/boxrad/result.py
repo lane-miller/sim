@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import warnings
 from functools import cached_property
 from pathlib import Path
@@ -34,6 +35,7 @@ from boxrad.post.transfer import (
     load_huygens_spectra,
     probe_fdtd_pressure_spectrum,
 )
+from boxrad.post.zrow import zrow_at_frequencies
 from boxrad.post.zrad import zrad_at_frequencies
 
 try:
@@ -105,6 +107,8 @@ class Result:
         self.frame_default = frame
         self._h5: Any | None = None
         self._spectra_cache: dict[float, tuple[SurfacePatches, complex, np.ndarray, np.ndarray]] = {}
+        self._geometry_cache: Any | None = None
+        self._radiator_open: dict[int, Result] = {}
 
     def _file(self) -> Any:
         if self._h5 is None:
@@ -264,6 +268,242 @@ class Result:
         if "S_grid" in self.meta:
             return float(self.meta["S_grid"])
         return float(self._grid.radiator_area_grid)
+
+    @cached_property
+    def _schema_version(self) -> int:
+        return int(self.meta.get("schema_version", 1))
+
+    @cached_property
+    def names(self) -> list[str]:
+        """Radiator names in config order (schema-1: ``[\"radiator\"]``)."""
+        if self._schema_version >= 2:
+            raw = self.meta.get("radiator_names_json")
+            if raw is None:
+                return ["radiator"]
+            if isinstance(raw, str):
+                return list(json.loads(raw))
+            return list(raw)
+        return ["radiator"]
+
+    @cached_property
+    def driven_index(self) -> int:
+        """Index of the radiator driven in this HDF5 file (schema-1: 0)."""
+        if self._schema_version >= 2:
+            return int(self.meta.get("driven_index", 0))
+        return 0
+
+    @cached_property
+    def S_list(self) -> np.ndarray:
+        """Discretized radiator areas ``(N,)`` in m² (schema-1: ``[S_grid]``)."""
+        if self._schema_version >= 2:
+            raw = self.meta.get("radiator_S_json")
+            if raw is None:
+                return np.array([self.S_grid], dtype=_F64)
+            if isinstance(raw, str):
+                return np.asarray(json.loads(raw), dtype=_F64)
+            return np.asarray(raw, dtype=_F64)
+        return np.array([self.S_grid], dtype=_F64)
+
+    def _primary_path(self) -> Path:
+        if self.driven_index == 0:
+            return self.path
+        raw = self.meta.get("run_files_json")
+        if raw is not None:
+            files = json.loads(raw) if isinstance(raw, str) else list(raw)
+            if files and files[0]:
+                return self.path.parent / str(files[0])
+        mobj = re.match(r"^(.+)\.r\d+_", self.path.name)
+        if mobj is not None:
+            return self.path.parent / f"{mobj.group(1)}{self.path.suffix}"
+        raise ValueError(
+            f"cannot resolve primary HDF5 for multi-radiator set from {self.path.name}"
+        )
+
+    def _run_files_basenames(self) -> list[str | None]:
+        if self._schema_version < 2:
+            return [self.path.name]
+        primary = self._primary_path()
+        if primary == self.path:
+            raw = self.meta.get("run_files_json")
+        else:
+            with Result(primary, frame=self.frame_default) as pr:
+                raw = pr.meta.get("run_files_json")
+        if raw is None:
+            out: list[str | None] = [None] * len(self.names)
+            out[0] = primary.name
+            if self.driven_index < len(out):
+                out[self.driven_index] = self.path.name
+            return out
+        if isinstance(raw, str):
+            return list(json.loads(raw))
+        return list(raw)
+
+    def _resolve_radiator_index(self, key: int | str) -> int:
+        names = self.names
+        if isinstance(key, str):
+            if key not in names:
+                raise ValueError(f"unknown radiator name {key!r}")
+            return names.index(key)
+        j = int(key)
+        if j < 0 or j >= len(names):
+            raise ValueError(f"radiator index {j} out of range for {len(names)} radiators")
+        return j
+
+    def radiator(self, key: int | str) -> Result:
+        """Open the HDF5 file that drives radiator ``key`` (index or name).
+
+        Index 0 or radiator 0's name on the primary file returns ``self`` when
+        this file drives radiator 0. Sibling files resolve ``run_files_json`` via
+        the primary file in the same directory.
+
+        Raises:
+            ValueError: Radiator was not driven in this run set.
+            FileNotFoundError: Expected sibling HDF5 is missing on disk.
+        """
+        j = self._resolve_radiator_index(key)
+        if j == self.driven_index:
+            return self
+        files = self._run_files_basenames()
+        if j >= len(files) or files[j] is None:
+            raise ValueError(f"radiator {self.names[j]} was not driven in this run set")
+        sibling = self.path.parent / files[j]
+        if not sibling.is_file():
+            raise FileNotFoundError(str(sibling))
+        cached = self._radiator_open.get(j)
+        if cached is not None:
+            return cached
+        out = Result(sibling, frame=self.frame_default)
+        self._radiator_open[j] = out
+        return out
+
+    def _built_geometry(self):
+        if self._geometry_cache is None:
+            from boxrad.geom.geometry import build_geometry
+
+            geom = build_geometry(self.config)
+            if geom is None:
+                raise ValueError("inside() requires a buildable solid geometry")
+            self._geometry_cache = geom
+        return self._geometry_cache
+
+    @cached_property
+    def poses(self) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Rigid rotation and translation ``(R, t)`` for each radiator (world frame)."""
+        geom = self._built_geometry()
+        out: list[tuple[np.ndarray, np.ndarray]] = []
+        for rd in geom.radiators:
+            r_mat = np.asarray(rd.pose.R, dtype=_F64)
+            t = np.asarray(rd.pose.position, dtype=_F64).reshape(3)
+            out.append((r_mat, t))
+        return out
+
+    def inside(
+        self,
+        points: np.ndarray | list,
+        *,
+        frame: Literal["local", "world"] | None = None,
+    ) -> np.ndarray:
+        """True where a point lies inside the solid or behind a rigid environment plane."""
+        frame_sel = self._resolve_frame(frame)
+        pts = np.atleast_2d(np.asarray(points, dtype=_F64))
+        if frame_sel == "local":
+            r0, t0 = self.poses[0]
+            pts_world = pts @ r0.T + t0
+        else:
+            pts_world = pts
+        geom = self._built_geometry()
+        in_solid = geom.inside(pts_world)
+        if self.planes:
+            behind = ~in_fluid(pts_world, self.planes)
+            return np.asarray(in_solid | behind, dtype=bool)
+        return np.asarray(in_solid, dtype=bool)
+
+    def Z_matrix(
+        self,
+        f: np.ndarray | float,
+        *,
+        allow_out_of_band: bool = False,
+    ) -> np.ndarray:
+        """Acoustic mutual impedance matrix ``Z_ij(f) = ρ c z_ij / S_j`` in Pa·s/m³.
+
+        Shape ``(n_f, N, N)``. Column ``j`` uses the file that drives radiator ``j``;
+        undriven columns are NaN. Raw mutual data (``mutual_status = recorded_unvalidated``).
+        """
+        f_arr = self._check_f(f, allow_out_of_band)
+        n_f = f_arr.size
+        n_rad = len(self.names)
+        rho = float(self.config.air.rho)
+        c = float(self.config.air.c)
+        s_list = self.S_list
+        z_mat = np.full((n_f, n_rad, n_rad), np.nan + 0j, dtype=_C128)
+        files = self._run_files_basenames()
+        for j in range(n_rad):
+            if j >= len(files) or files[j] is None:
+                continue
+            path_j = self.path.parent / files[j]
+            z_row = zrow_at_frequencies(path_j, f_arr)
+            sj = float(s_list[j])
+            for i in range(n_rad):
+                z_mat[:, i, j] = (rho * c * z_row[:, i] / sj).astype(_C128, copy=False)
+        return z_mat
+
+    def field_sum(
+        self,
+        points: np.ndarray | list,
+        f: np.ndarray | float,
+        U: np.ndarray | None = None,
+        *,
+        frame: Literal["local", "world"] | None = None,
+        allow_out_of_band: bool = False,
+    ) -> np.ndarray:
+        """Superposed pressure ``Σ_j (U_j/S_j) H_j(x, f)`` with ``H_j = p/v`` (Pa/(m/s)).
+
+        ``frame=\"local\"`` is radiator 0's local frame (siblings are evaluated in world).
+        """
+        frame_sel = self._resolve_frame(frame)
+        f_arr = self._check_f(f, allow_out_of_band)
+        pts = np.atleast_2d(np.asarray(points, dtype=_F64))
+        if frame_sel == "local":
+            r0, t0 = self.poses[0]
+            pts_world = pts @ r0.T + t0
+        else:
+            pts_world = pts
+
+        n_rad = len(self.names)
+        n_f = f_arr.size
+        if U is None:
+            u_arr = np.ones((n_f, n_rad), dtype=_F64)
+        else:
+            u_in = np.asarray(U, dtype=_F64)
+            if u_in.ndim == 1:
+                if u_in.shape[0] != n_rad:
+                    raise ValueError(f"U length {u_in.shape[0]} != n_radiators {n_rad}")
+                u_arr = np.broadcast_to(u_in.reshape(1, n_rad), (n_f, n_rad)).copy()
+            elif u_in.ndim == 2:
+                if u_in.shape != (n_f, n_rad):
+                    raise ValueError(f"U shape {u_in.shape} != ({n_f}, {n_rad})")
+                u_arr = u_in
+            else:
+                raise ValueError("U must have shape (N,) or (F, N)")
+        files = self._run_files_basenames()
+        for j in range(n_rad):
+            driven = j < len(files) and files[j] is not None
+            if not driven and np.any(u_arr[:, j] != 0.0):
+                raise ValueError(f"radiator {self.names[j]} was not driven in this run set")
+        s_list = self.S_list
+        out = np.zeros((n_f, pts_world.shape[0]), dtype=_C128)
+        for j in range(n_rad):
+            if j >= len(files) or files[j] is None:
+                continue
+            hj = self.radiator(j).field(
+                pts_world,
+                f_arr,
+                frame="world",
+                allow_out_of_band=allow_out_of_band,
+            )
+            scale = (u_arr[:, j] / float(s_list[j])).reshape(n_f, 1)
+            out += scale * hj
+        return out
 
     def summary(self) -> str:
         """Multi-line human-readable summary (version, geometry, band, h, radiator, tail).
