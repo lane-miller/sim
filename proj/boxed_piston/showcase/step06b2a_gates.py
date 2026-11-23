@@ -92,7 +92,7 @@ def _c12a(leg_h5: Path, s3p_h5: Path) -> tuple[bool, dict[str, Any]]:
             ref = np.max(np.abs(d_leg))
             mask = 20 * np.log10(np.maximum(np.abs(d_leg) / max(ref, 1e-30), 1e-30)) > -30.0
             if np.any(mask):
-                ratio = d_p[:, mask] / d_leg[:, mask]
+                ratio = np.where(mask, d_p / np.where(mask, d_leg, 1.0), 1.0)
                 db = np.abs(20 * np.log10(np.abs(ratio)))
                 max_db = max(max_db, float(np.max(db)))
         di_ok = max_db <= 0.001
@@ -124,7 +124,7 @@ def _power_gate(name: str, h5: Path) -> tuple[bool, dict[str, Any]]:
         ok_all = True
         for f_hz in freqs:
             _, z = res.z(f_hz)
-            w_c = 0.5 * rho * c * res.S_grid * float(np.real(z))
+            w_c = 0.5 * rho * c * res.S_grid * float(np.real(z[0]))
             patches, v_ref, p_f, vn_f = load_huygens_spectra(h5, res.derived, float(f_hz))
             w_h = _w_huygens(
                 p_f,
@@ -202,7 +202,7 @@ def main() -> int:
             ratios = []
             for f_hz in freqs:
                 _, z = res.z(f_hz)
-                w_c = 0.5 * rho * c * res.S_grid * float(np.real(z))
+                w_c = 0.5 * rho * c * res.S_grid * float(np.real(z[0]))
                 patches, v_ref, p_f, vn_f = load_huygens_spectra(h5s[key], res.derived, float(f_hz))
                 w_h = _w_huygens(p_f, vn_f, np.asarray(patches.areas), complex(v_ref))
                 ratios.append(w_h / max(w_c, 1e-30))
