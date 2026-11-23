@@ -115,7 +115,10 @@ class Result:
         g = self._file()["meta"]
         out: dict[str, Any] = {}
         for key, val in g.attrs.items():
-            out[key] = val.item() if hasattr(val, "item") else val
+            if isinstance(val, np.ndarray) and val.size != 1:
+                out[key] = val.tolist()
+            else:
+                out[key] = val.item() if hasattr(val, "item") else val
         return out
 
     @cached_property
@@ -142,6 +145,8 @@ class Result:
     @cached_property
     def S_grid(self) -> float:
         """Discretized radiator area ``h² Σ w`` in m² (used for every z ↔ Z conversion)."""
+        if "S_grid" in self.meta:
+            return float(self.meta["S_grid"])
         return float(self._grid.radiator_area_grid)
 
     def summary(self) -> str:
@@ -276,7 +281,9 @@ class Result:
         return self._huygens_at_f(f_hz)[1]
 
     def _image_plane_z(self) -> float | None:
-        return 0.0 if self.config.geometry == "baffle" else None
+        if self.config.geometry == "baffle":
+            return 0.0
+        return None
 
     def _probe_hit(
         self,
@@ -364,6 +371,7 @@ class Result:
             p_ts = np.asarray(file["probes/p"][()], dtype=_F64)
 
         geom = self.config.geometry
+        kh_geom = "box" if geom == "parametric" else geom
         close: np.ndarray | None = None
         for fi, f_hz in enumerate(f_arr):
             patches, v_ref, p_face, vn_face = self._huygens_at_f(float(f_hz))
@@ -392,7 +400,7 @@ class Result:
                     float(f_hz),
                     rho,
                     c,
-                    geometry=geom,
+                    geometry=kh_geom,
                 )
                 out[fi, free] = p_kh / v_ref
             if np.any(close) and has_probes:

@@ -84,7 +84,7 @@ For a fuller script (plots of $z$, SPL, and polar patterns), see
 
 | Path | Contents |
 |---|---|
-| `boxrad/` | Installable package (solver, recorder, post-processing, `Result`, CLIs) |
+| `boxrad/` | Installable package (solver, `Recorder` / `GeomRecorder`, post-processing, `Result`, CLIs) |
 | `configs/` | `default.json` (quickstart example), validation configs (`c05_*` … `c09_*`), and demos (`configs/demo/`) |
 | `validation/` | Check scripts C1–C11 (not part of the wheel); results in `validation/results/` |
 | `tests/` | pytest unit tests (`-m "not slow"` for the fast set) |

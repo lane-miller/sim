@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from dataclasses import asdict, dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Literal
+
+_PARAMETRIC_GEOMETRY_JSON_KEYS = ("parts", "radiators", "environment")
 
 if TYPE_CHECKING:
     from boxrad.geomconfig import GeometrySpec
@@ -112,6 +115,9 @@ class Config:
     numerics: Numerics = field(default_factory=Numerics)
     output: Output = field(default_factory=Output)
     geometry_spec: GeometrySpec | None = field(default=None, repr=False, compare=False)
+    geometry_sections: dict[str, Any] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.geometry_spec is None:
@@ -123,6 +129,17 @@ class Config:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d.pop("geometry_spec", None)
+        extra = d.pop("geometry_sections", None)
+        if extra:
+            merged: dict[str, Any] = {}
+            for key, val in d.items():
+                merged[key] = val
+                if key == "output":
+                    for gk, gv in extra.items():
+                        merged[gk] = gv
+            if "output" not in d:
+                merged.update(extra)
+            d = merged
         return d
 
     @classmethod
@@ -139,6 +156,13 @@ class Config:
             radiator = _radiator_from_geometry_spec(geometry_spec)
         else:
             radiator = Radiator(**radiator_raw)
+        geometry_sections: dict[str, Any] | None = None
+        if geometry not in ("box", "baffle"):
+            sections: dict[str, Any] = {}
+            for key in _PARAMETRIC_GEOMETRY_JSON_KEYS:
+                if key in data:
+                    sections[key] = copy.deepcopy(data[key])
+            geometry_sections = sections or None
         return cls(
             geometry=geometry,
             air=Air(**data.get("air", {})),
@@ -148,6 +172,7 @@ class Config:
             numerics=Numerics(**data.get("numerics", {})),
             output=Output(**data.get("output", {})),
             geometry_spec=geometry_spec,
+            geometry_sections=geometry_sections,
         )
 
     def to_json(self, **kwargs: Any) -> str:

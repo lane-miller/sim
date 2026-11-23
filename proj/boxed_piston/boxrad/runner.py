@@ -334,7 +334,73 @@ def run(
             summary = dry_run_geom(config)
             _print_dry_run_summary(summary)
             return summary
-        raise NotImplementedError("parametric recording lands in v0.3 step 6b2")
+
+        from boxrad.geomrec import GeomRecorder
+        from boxrad.geomrun import prepare_geom_run, step_geom
+
+        run = prepare_geom_run(config)
+        _check_memory(run.derived, ram_limit_bytes)
+
+        dest = _resolve_out_path(config, cfg_source, Path(out_path) if out_path else None)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        rec: GeomRecorder | None = None
+        aborted_step: int | None = None
+        tail_db: float | None = None
+        t_wall_start = time.perf_counter()
+        last_pct = -2
+        try:
+            rec = GeomRecorder(
+                config,
+                run.derived,
+                run.gg,
+                run.geometry,
+                run.info,
+                dest,
+            )
+            n_steps = run.derived.n_steps
+            for n in range(n_steps):
+                step_geom(run, n)
+                rec.sample(run.fields, n)
+                if progress:
+                    last_pct = _progress_tick(
+                        n, n_steps, run.derived.dt, t_wall_start, last_pct=last_pct
+                    )
+                if (n + 1) % stability_interval == 0 or n + 1 == n_steps:
+                    if _stability_failed(run.fields.p, stability_p_max):
+                        aborted_step = n
+                        raise RuntimeError(
+                            f"stability guard failed at step {n} "
+                            f"(non-finite p or |p| > {stability_p_max:.3g})"
+                        )
+        except RuntimeError:
+            if rec is not None and rec._file is not None and aborted_step is not None:
+                meta = rec._file["meta"]
+                meta.attrs["aborted"] = True
+                meta.attrs["aborted_at_step"] = aborted_step
+            raise
+        finally:
+            if rec is not None:
+                wall_s = time.perf_counter() - t_wall_start
+                if rec._file is not None:
+                    meta = rec._file["meta"]
+                    meta.attrs["wall_time_s"] = wall_s
+                    meta.attrs["numba_num_threads"] = _numba_thread_count()
+                    meta.attrs["git_commit"] = _git_commit_hash()
+                rec.close()
+                tail_db = rec._tail_db
+        if tail_db is not None and tail_db > -60.0:
+            print(
+                f"warning: p_avg tail {tail_db:.1f} dB re peak (> −60 dB); "
+                "increase numerics.n_transits",
+                file=sys.stderr,
+            )
+        if plot:
+            print(
+                "plot not available for parametric geometry yet",
+                file=sys.stderr,
+            )
+        return dest
 
     from boxrad.geomconfig import check_geometry_v03_guards
 

@@ -108,6 +108,7 @@ class Fractions:
     radiator_a: list[np.ndarray]
     radiator_S: list[float]
     stats: dict[str, Any]
+    radiator_centroid: list[np.ndarray] = field(default_factory=list)
 
 
 def _pose_axis_normal(radiator) -> np.ndarray | None:
@@ -705,6 +706,7 @@ def _accumulate_radiator(
     ny,
     nz,
     a_cell,
+    m_cell,
 ):
     poly_a = np.zeros((_MAX_POLY, 3), dtype=np.float64)
     poly_b = np.zeros((_MAX_POLY, 3), dtype=np.float64)
@@ -749,9 +751,14 @@ def _accumulate_radiator(
                         nv = _clip_polygon_tangential(
                             v0, v1, v2, 1, 2, ymin, ymax, zmin, zmax, poly_a, poly_b
                         )
-                        area, _, _, _ = _poly_area_centroid(poly_a, nv)
+                        area, cx, cy, cz = _poly_area_centroid(poly_a, nv)
                         if area >= 1e-12 * h * h:
-                            a_cell[(ii * ny + jj) * nz + kk] += area * edot
+                            idx = (ii * ny + jj) * nz + kk
+                            w = area * edot
+                            a_cell[idx] += w
+                            m_cell[idx, 0] += w * cx
+                            m_cell[idx, 1] += w * cy
+                            m_cell[idx, 2] += w * cz
             elif on_axis == 1:
                 jj = max(0, min(ny - 1, on_layer))
                 i0 = max(0, int(math.floor((lo_x - x0x) * inv_h)))
@@ -767,9 +774,14 @@ def _accumulate_radiator(
                         nv = _clip_polygon_tangential(
                             v0, v1, v2, 0, 2, xmin, xmax, zmin, zmax, poly_a, poly_b
                         )
-                        area, _, _, _ = _poly_area_centroid(poly_a, nv)
+                        area, cx, cy, cz = _poly_area_centroid(poly_a, nv)
                         if area >= 1e-12 * h * h:
-                            a_cell[(ii * ny + jj) * nz + kk] += area * edot
+                            idx = (ii * ny + jj) * nz + kk
+                            w = area * edot
+                            a_cell[idx] += w
+                            m_cell[idx, 0] += w * cx
+                            m_cell[idx, 1] += w * cy
+                            m_cell[idx, 2] += w * cz
             else:
                 kk = max(0, min(nz - 1, on_layer))
                 i0 = max(0, int(math.floor((lo_x - x0x) * inv_h)))
@@ -785,9 +797,14 @@ def _accumulate_radiator(
                         nv = _clip_polygon_tangential(
                             v0, v1, v2, 0, 1, xmin, xmax, ymin, ymax, poly_a, poly_b
                         )
-                        area, _, _, _ = _poly_area_centroid(poly_a, nv)
+                        area, cx, cy, cz = _poly_area_centroid(poly_a, nv)
                         if area >= 1e-12 * h * h:
-                            a_cell[(ii * ny + jj) * nz + kk] += area * edot
+                            idx = (ii * ny + jj) * nz + kk
+                            w = area * edot
+                            a_cell[idx] += w
+                            m_cell[idx, 0] += w * cx
+                            m_cell[idx, 1] += w * cy
+                            m_cell[idx, 2] += w * cz
             continue
         for i in range(i0x, i1x + 1):
             for j in range(i0y, i1y + 1):
@@ -808,7 +825,17 @@ def _accumulate_radiator(
                         if area < 1e-12 * h * h:
                             continue
                         nid = (i * ny + j) * nz + k
-                        a_cell[nid] += area * edot
+                        t0v = tmp_tris[t, 0]
+                        t1v = tmp_tris[t, 1]
+                        t2v = tmp_tris[t, 2]
+                        cx = (t0v[0] + t1v[0] + t2v[0]) / 3.0
+                        cy = (t0v[1] + t1v[1] + t2v[1]) / 3.0
+                        cz = (t0v[2] + t1v[2] + t2v[2]) / 3.0
+                        w = area * edot
+                        a_cell[nid] += w
+                        m_cell[nid, 0] += w * cx
+                        m_cell[nid, 1] += w * cy
+                        m_cell[nid, 2] += w * cz
 
 
 @njit(cache=False)
@@ -1109,10 +1136,12 @@ def compute_fractions(geometry: Geometry | None, grid: Grid) -> Fractions:
     rad_cell: list[np.ndarray] = []
     rad_a: list[np.ndarray] = []
     rad_S: list[float] = []
+    rad_centroid: list[np.ndarray] = []
     for rd in geometry.radiators:
         ere = rd.pose.R[:, 2]
         ere = ere / np.linalg.norm(ere)
         a_c = np.zeros(ncell, dtype=_F64)
+        m_c = np.zeros((ncell, 3), dtype=_F64)
         v = _snap_mesh(TriMesh(rd.vertices_world, rd.triangles), grid).vertices
         _accumulate_radiator(
             v,
@@ -1126,10 +1155,12 @@ def compute_fractions(geometry: Geometry | None, grid: Grid) -> Fractions:
             ny,
             nz,
             a_c,
+            m_c,
         )
         mask = a_c != 0.0
         rad_cell.append(np.where(mask)[0].astype(_I64))
         rad_a.append(a_c[mask].astype(_F64))
+        rad_centroid.append((m_c[mask] / a_c[mask, np.newaxis]).astype(_F64))
         rad_S.append(float(np.sum(a_c)))
     wall_s = time.perf_counter() - t0
     stats = {
@@ -1158,5 +1189,6 @@ def compute_fractions(geometry: Geometry | None, grid: Grid) -> Fractions:
         radiator_cell=rad_cell,
         radiator_a=rad_a,
         radiator_S=rad_S,
+        radiator_centroid=rad_centroid,
         stats=stats,
     )

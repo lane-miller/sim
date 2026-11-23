@@ -27,6 +27,10 @@ _HUYGENS_POWER_NOTE = (
 
 
 def cells_across_radiator(cfg: Config, derived: Derived) -> float:
+    if cfg.geometry_spec is not None:
+        from boxrad.geomderive import _radiator_D_min
+
+        return _radiator_D_min(cfg.geometry_spec) / derived.h
     rad = cfg.radiator
     if rad.shape == "circle":
         d = rad.dims[0]

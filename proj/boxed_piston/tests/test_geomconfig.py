@@ -15,6 +15,26 @@ from boxrad.runner import run
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 SHOWCASE = CONFIGS / "showcase"
+_LEGACY_TO_JSON_KEYS = frozenset(
+    {"geometry", "air", "box", "radiator", "band", "numerics", "output"}
+)
+
+
+def _showcase_json_paths() -> list[Path]:
+    return sorted(SHOWCASE.glob("*.json"))
+
+
+def _assert_geometry_spec_parity(a, b) -> None:
+    assert a.tag == b.tag
+    assert len(a.parts) == len(b.parts)
+    assert len(a.radiators) == len(b.radiators)
+    assert len(a.environment.planes) == len(b.environment.planes)
+    for r_a, r_b in zip(a.radiators, b.radiators, strict=True):
+        assert r_a.name == r_b.name
+        if r_a.pose is not None and r_b.pose is not None:
+            assert np.allclose(r_a.pose.position, r_b.pose.position, atol=1e-12)
+            assert np.allclose(r_a.pose.normal, r_b.pose.normal, atol=1e-12)
+            assert np.allclose(r_a.pose.x_axis, r_b.pose.x_axis, atol=1e-12)
 
 
 def _legacy_config_paths() -> list[Path]:
@@ -206,6 +226,29 @@ def test_s2_bookshelf_parse_and_guard() -> None:
 def test_parse_geometry_errors(cfg_dict: dict, match: str) -> None:
     with pytest.raises(ValueError, match=match):
         parse_geometry(cfg_dict)
+
+
+@pytest.mark.parametrize("path", _showcase_json_paths(), ids=lambda p: p.name)
+def test_showcase_to_json_roundtrip(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    c = Config.from_json(text)
+    j0 = c.to_json()
+    c2 = Config.from_json(j0)
+    if c.geometry_spec != c2.geometry_spec:
+        _assert_geometry_spec_parity(c.geometry_spec, c2.geometry_spec)
+    assert c2.to_json() == j0
+
+
+@pytest.mark.parametrize(
+    "path",
+    [CONFIGS / "c09_box.json", CONFIGS / "c06_baffle.json"],
+    ids=lambda p: p.name,
+)
+def test_legacy_box_baffle_to_json_keys_unchanged(path: Path) -> None:
+    cfg = Config.from_json(path.read_text(encoding="utf-8"))
+    keys = frozenset(json.loads(cfg.to_json()))
+    assert "parts" not in keys
+    assert keys <= _LEGACY_TO_JSON_KEYS
 
 
 def test_box_environment_dry_run_not_implemented(tmp_path: Path) -> None:
