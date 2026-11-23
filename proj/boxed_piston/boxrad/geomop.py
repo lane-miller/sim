@@ -9,13 +9,8 @@ import numpy as np
 
 from boxrad.config import Config, Derived
 from boxrad.cutcell import compute_fractions
-from boxrad.cutkernel import (
-    CutOperator,
-    FastRadiator,
-    PatchRadiator,
-    assert_geometry_clear_of_cpml,
-    build_operator,
-)
+from boxrad.cutkernel import CutOperator, FastRadiator, PatchRadiator, build_operator
+from boxrad.grid import CpmlSlabs
 from boxrad.geom.geometry import Geometry
 from boxrad.geomderive import GeomGrid, cut_grid
 from boxrad.smallcell import apply_floor, courant_lambda, stability_ok, thin_wall_cells
@@ -153,6 +148,59 @@ def _build_radiator_0(
     return path, fast, patch, S_grid
 
 
+def _assert_geometry_clear_of_cpml_sides(
+    op: CutOperator,
+    slabs: CpmlSlabs,
+    cpml_sides: tuple[bool, ...],
+) -> None:
+    """Like cutkernel.assert_geometry_clear_of_cpml, but only on absorbing (CPML) sides."""
+    c = slabs.cpml_cells
+    nx = op.inv_beta.shape[0]
+    ny = op.inv_beta.shape[1]
+    nz = op.inv_beta.shape[2]
+    tol = _F32(1.0 - 1e-5)
+
+    def _check_p(lo: int, hi: int, axis: int) -> None:
+        sl = [slice(None)] * 3
+        sl[axis] = slice(lo, hi)
+        block = op.inv_beta[tuple(sl)]
+        if np.any(block < tol):
+            raise ValueError("CPML slab: inv_beta != 1")
+
+    if cpml_sides[0]:
+        _check_p(0, c, 0)
+    if cpml_sides[1]:
+        _check_p(nx - c, nx, 0)
+    if cpml_sides[2]:
+        _check_p(0, c, 1)
+    if cpml_sides[3]:
+        _check_p(ny - c, ny, 1)
+    if cpml_sides[4]:
+        _check_p(0, c, 2)
+    if cpml_sides[5]:
+        _check_p(nz - c, nz, 2)
+
+    def _check_face(afl: np.ndarray, lo: int, hi: int, axis: int) -> None:
+        sl = [slice(None)] * 3
+        sl[axis] = slice(lo, hi)
+        block = afl[tuple(sl)]
+        if np.any(block < tol):
+            raise ValueError("CPML slab: face afl != 1")
+
+    if cpml_sides[0]:
+        _check_face(op.afl_x, 0, c + 1, 0)
+    if cpml_sides[1]:
+        _check_face(op.afl_x, nx - c, nx + 1, 0)
+    if cpml_sides[2]:
+        _check_face(op.afl_y, 0, c + 1, 1)
+    if cpml_sides[3]:
+        _check_face(op.afl_y, ny - c, ny + 1, 1)
+    if cpml_sides[4]:
+        _check_face(op.afl_z, 0, c + 1, 2)
+    if cpml_sides[5]:
+        _check_face(op.afl_z, nz - c, nz + 1, 2)
+
+
 def build_run_operator(
     cfg: Config,
     derived: Derived,
@@ -179,7 +227,7 @@ def build_run_operator(
         fractions, derived.h, gg.nx, gg.ny, gg.nz, geometry
     )
     op = build_operator(fractions, beta_tilde.astype(_F32), fast, patch, derived.h)
-    assert_geometry_clear_of_cpml(op, gg.cpml_slabs)
+    _assert_geometry_clear_of_cpml_sides(op, gg.cpml_slabs, derived.cpml_sides)
 
     n_closed = (
         op.closed_faces_x.size + op.closed_faces_y.size + op.closed_faces_z.size

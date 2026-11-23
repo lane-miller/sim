@@ -198,6 +198,22 @@ class Result:
         return dirs @ r_mat.T
 
     @cached_property
+    def planes(self) -> list[dict[str, Any]]:
+        """Environment rigid planes from ``meta.environment_json`` (empty if absent)."""
+        raw = self.meta.get("environment_json")
+        if raw is None or raw == "":
+            return []
+        if isinstance(raw, str):
+            return json.loads(raw)
+        if isinstance(raw, (list, tuple)):
+            return list(raw)
+        return []
+
+    def _guard_planes_kh(self) -> None:
+        if self.planes:
+            raise NotImplementedError("image KH lands in v0.3 step 7b")
+
+    @cached_property
     def S_grid(self) -> float:
         """Discretized radiator area ``h² Σ w`` in m² (used for every z ↔ Z conversion)."""
         if "S_grid" in self.meta:
@@ -425,6 +441,7 @@ class Result:
         """
         if per not in ("velocity", "volume_velocity"):
             raise ValueError(f"per must be 'velocity' or 'volume_velocity', got {per!r}")
+        self._guard_planes_kh()
         frame_sel = self._resolve_frame(frame)
         f_arr = self._check_f(f, allow_out_of_band)
         pts = np.atleast_2d(np.asarray(points, dtype=_F64))
@@ -524,6 +541,7 @@ class Result:
         Raises:
             ValueError: Out-of-band ``f`` without ``allow_out_of_band``.
         """
+        self._guard_planes_kh()
         frame_sel = self._resolve_frame(frame)
         f_arr = self._check_f(f, allow_out_of_band)
         th = np.atleast_1d(np.asarray(theta, dtype=_F64))
@@ -671,6 +689,7 @@ class Result:
         Raises:
             ValueError: Out-of-band ``f`` without ``allow_out_of_band``.
         """
+        self._guard_planes_kh()
         frame_sel = self._resolve_frame(frame)
         f_arr = self._check_f(f, allow_out_of_band)
         rho = float(self.config.air.rho)

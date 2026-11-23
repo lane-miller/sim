@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -20,12 +20,15 @@ from boxrad.config import (
     resolve_decimation,
 )
 from boxrad.geom.geometry import Geometry
-from boxrad.grid import build_cpml_slabs
+from boxrad.cutcell import _side_key
+from boxrad.geomconfig import PlaneSpec
+from boxrad.grid import SlabRange, build_cpml_slabs
 
 if TYPE_CHECKING:
     from boxrad.geomconfig import GeometrySpec, ShapeSpec
 
 _F64 = np.float64
+_AXIS = ("x", "y", "z")
 
 
 @dataclass(frozen=True)
@@ -40,9 +43,16 @@ class GeomGrid:
     x0: np.ndarray
     cpml_slabs: object
     cfg: Config
+    rigid_sides: dict[str, bool] | None = None
+    planes: tuple = ()
+    h_nominal: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "x0", np.asarray(self.x0, dtype=_F64).reshape(3))
+        if self.rigid_sides is None:
+            object.__setattr__(self, "rigid_sides", {})
+        if self.h_nominal <= 0.0:
+            object.__setattr__(self, "h_nominal", float(self.h))
 
 
 def cut_grid(gg: GeomGrid):
@@ -53,7 +63,8 @@ def cut_grid(gg: GeomGrid):
         x0=gg.x0,
         h=gg.h,
         shape=(gg.nx, gg.ny, gg.nz),
-        rigid_sides={},
+        rigid_sides=dict(gg.rigid_sides or {}),
+        h_nominal=float(gg.h_nominal),
     )
 
 
@@ -89,6 +100,82 @@ def _snap_bbox(
     return lo_s, hi_s
 
 
+def _anchors_axis(planes: tuple[PlaneSpec, ...], n_hat: np.ndarray, pos0: np.ndarray, lo_a: float, axis: int) -> list[float]:
+    anc: list[float] = []
+    for pl in planes:
+        if pl.axis == _AXIS[axis]:
+            anc.append(float(pl.offset))
+    if abs(float(n_hat[axis])) > 1.0 - 1e-12:
+        anc.append(float(pos0[axis]))
+    if not anc:
+        anc.append(float(lo_a))
+    return sorted(set(anc))
+
+
+def _shrink_h_isotropic(h: float, planes: tuple[PlaneSpec, ...], n_hat: np.ndarray, pos0: np.ndarray, lo: np.ndarray) -> float:
+    h_use = float(h)
+    for axis in range(3):
+        anc = _anchors_axis(planes, n_hat, pos0, float(lo[axis]), axis)
+        if len(anc) == 2:
+            d = abs(anc[1] - anc[0])
+            if d > 0.0:
+                ncell = int(math.ceil(d / h_use - 1e-9))
+                h_use = min(h_use, d / max(ncell, 1))
+    return h_use
+
+
+def _plane_crossing_errors(
+    geometry: Geometry,
+    planes: tuple[PlaneSpec, ...],
+) -> None:
+    xlo, ylo, zlo, xhi, yhi, zhi = geometry.solid.bbox
+    lo = np.array([xlo, ylo, zlo], dtype=_F64)
+    hi = np.array([xhi, yhi, zhi], dtype=_F64)
+    l_bbox = float(np.max(hi - lo))
+    eps = 1e-9 * max(1.0, l_bbox)
+    for pl in planes:
+        axis = _AXIS.index(pl.axis)
+        off = float(pl.offset)
+        if pl.side == "-":
+            if float(lo[axis]) < off - eps:
+                raise ValueError(
+                    f"solid crosses rigid plane {pl.axis}- at offset {off} by more than tolerance"
+                )
+        elif float(hi[axis]) > off + eps:
+            raise ValueError(
+                f"solid crosses rigid plane {pl.axis}+ at offset {off} by more than tolerance"
+            )
+
+
+def _plane_offset(planes: tuple[PlaneSpec, ...], axis: int, side: str) -> float | None:
+    for pl in planes:
+        if pl.axis == _AXIS[axis] and pl.side == side:
+            return float(pl.offset)
+    return None
+
+
+def _cpml_slabs_for_planes(
+    nx: int,
+    ny: int,
+    nz: int,
+    cpml_cells: int,
+    rigid_sides: dict[str, bool],
+) -> object:
+    slabs = build_cpml_slabs(nx, ny, nz, cpml_cells)
+    i_lo = 0 if rigid_sides.get("x-", False) else cpml_cells
+    i_hi = nx if rigid_sides.get("x+", False) else nx - cpml_cells
+    j_lo = 0 if rigid_sides.get("y-", False) else cpml_cells
+    j_hi = ny if rigid_sides.get("y+", False) else ny - cpml_cells
+    k_lo = 0 if rigid_sides.get("z-", False) else cpml_cells
+    k_hi = nz if rigid_sides.get("z+", False) else nz - cpml_cells
+    return replace(
+        slabs,
+        i_inner=SlabRange(i_lo, i_hi),
+        j_inner=SlabRange(j_lo, j_hi),
+        k_inner=SlabRange(k_lo, k_hi),
+    )
+
+
 def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
     """Compute derived parameters and a :class:`GeomGrid` from solid bbox and radiator rules."""
     from boxrad.geomconfig import check_geometry_v03_guards
@@ -109,9 +196,12 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
     lambda_min = c / f_max
 
     if num.h_override is not None:
-        h = float(num.h_override)
+        h_nominal = float(num.h_override)
     else:
-        h = min(lambda_min / num.ppw, D_min / num.cells_across_radiator)
+        h_nominal = min(lambda_min / num.ppw, D_min / num.cells_across_radiator)
+
+    planes = spec.environment.planes
+    _plane_crossing_errors(geometry, planes)
 
     xlo, ylo, zlo, xhi, yhi, zhi = geometry.solid.bbox
     lo = np.array([xlo, ylo, zlo], dtype=_F64)
@@ -120,22 +210,67 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
     n_hat = geometry.radiators[0].pose.R[:, 2]
     n_hat = n_hat / np.linalg.norm(n_hat)
     pos0 = geometry.radiators[0].pose.position.astype(_F64)
+
+    h = _shrink_h_isotropic(h_nominal, planes, n_hat, pos0, lo)
+
     anchors = np.empty(3, dtype=_F64)
     for a in range(3):
-        if abs(float(n_hat[a])) > 1.0 - 1e-12:
-            anchors[a] = float(pos0[a])
-        else:
-            anchors[a] = float(lo[a])
+        anc = _anchors_axis(planes, n_hat, pos0, float(lo[a]), a)
+        anchors[a] = anc[0]
 
     lo_s, hi_s = _snap_bbox(lo, hi, h, anchors)
-    nbx = max(1, round((hi_s[0] - lo_s[0]) / h))
-    nby = max(1, round((hi_s[1] - lo_s[1]) / h))
-    nbz = max(1, round((hi_s[2] - lo_s[2]) / h))
-    rw, rh, rd = nbx * h, nby * h, nbz * h
 
-    nx = nbx + 2 * gap_cells + 2 * cpml_cells
-    ny = nby + 2 * gap_cells + 2 * cpml_cells
-    nz = nbz + 2 * gap_cells + 2 * cpml_cells
+    rigid_sides: dict[str, bool] = {f"{pl.axis}{pl.side}": True for pl in planes}
+
+    lo_d = lo_s.copy()
+    hi_d = hi_s.copy()
+    for a in range(3):
+        neg_key = _side_key(a, "-")
+        pos_key = _side_key(a, "+")
+        if rigid_sides.get(neg_key, False):
+            plane_off = _plane_offset(planes, a, "-")
+            if plane_off is None:
+                raise AssertionError(f"missing plane offset for rigid {neg_key}")
+            gap = float(lo_s[a]) - plane_off
+            if gap > 1e-12:
+                n_gap = gap / h
+                if abs(n_gap - round(n_gap)) > 1e-9:
+                    raise AssertionError(
+                        f"plane-to-bbox gap not integer cells on {_AXIS[a]}"
+                    )
+            lo_d[a] = plane_off
+        if rigid_sides.get(pos_key, False):
+            plane_off = _plane_offset(planes, a, "+")
+            if plane_off is None:
+                raise AssertionError(f"missing plane offset for rigid {pos_key}")
+            gap = plane_off - float(hi_s[a])
+            if gap > 1e-12:
+                n_gap = gap / h
+                if abs(n_gap - round(n_gap)) > 1e-9:
+                    raise AssertionError(
+                        f"bbox-to-plane gap not integer cells on {_AXIS[a]}"
+                    )
+            hi_d[a] = plane_off
+
+    nbx = max(1, round((hi_d[0] - lo_d[0]) / h))
+    nby = max(1, round((hi_d[1] - lo_d[1]) / h))
+    nbz = max(1, round((hi_d[2] - lo_d[2]) / h))
+    rw, rh, rd = nbx * h, nby * h, nbz * h
+    gap_cpml = gap_cells + cpml_cells
+    pad_lo = np.empty(3, dtype=np.int64)
+    pad_hi = np.empty(3, dtype=np.int64)
+    for a in range(3):
+        pad_lo[a] = 0 if rigid_sides.get(_side_key(a, "-"), False) else gap_cpml
+        pad_hi[a] = 0 if rigid_sides.get(_side_key(a, "+"), False) else gap_cpml
+
+    nx = nbx + int(pad_lo[0]) + int(pad_hi[0])
+    ny = nby + int(pad_lo[1]) + int(pad_hi[1])
+    nz = nbz + int(pad_lo[2]) + int(pad_hi[2])
+
+    cpml_sides = list(CPML_SIDES_ALL)
+    for pl in planes:
+        idx = _AXIS.index(pl.axis)
+        cpml_sides[2 * idx + (0 if pl.side == "-" else 1)] = False
     total_cells = nx * ny * nz
     cell_budget_exceeded = total_cells > num.cell_budget
 
@@ -176,8 +311,13 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
     )
     sigma, t0 = pulse_params(cfg, _pulse_der)
 
-    max_dim = max(rw, rh, rd)
-    run_time_s = t0 + 6.0 * sigma + num.n_transits * (max_dim + 2.0 * gap_m) / c
+    dom_extents = [
+        (nbx + (0 if rigid_sides.get("x-", False) else gap_cells) + (0 if rigid_sides.get("x+", False) else gap_cells)) * h,
+        (nby + (0 if rigid_sides.get("y-", False) else gap_cells) + (0 if rigid_sides.get("y+", False) else gap_cells)) * h,
+        (nbz + (0 if rigid_sides.get("z-", False) else gap_cells) + (0 if rigid_sides.get("z+", False) else gap_cells)) * h,
+    ]
+    l_dom = max(dom_extents)
+    run_time_s = t0 + 6.0 * sigma + num.n_transits * l_dom / c
     n_steps = max(1, math.ceil(run_time_s / dt))
     ppw_realized = lambda_min / h
 
@@ -185,9 +325,27 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
         cfg, f_max=f_max, sigma=sigma, t0=t0, dt=dt
     )
 
-    x0 = lo_s - (gap_cells + cpml_cells) * h
-    slabs = build_cpml_slabs(nx, ny, nz, cpml_cells)
-    gg = GeomGrid(nx=nx, ny=ny, nz=nz, h=h, cpml=cpml_cells, x0=x0, cpml_slabs=slabs, cfg=cfg)
+    x0 = lo_d - pad_lo.astype(_F64) * h
+    for a in range(3):
+        extent = float(hi_d[a] - lo_d[a]) + float(pad_lo[a] + pad_hi[a]) * h
+        n_cells = (nbx, nby, nbz)[a] + int(pad_lo[a]) + int(pad_hi[a])
+        if abs(extent / h - n_cells) > 1e-9:
+            raise AssertionError(f"grid extent not integer cells on axis {_AXIS[a]}")
+
+    slabs = _cpml_slabs_for_planes(nx, ny, nz, cpml_cells, rigid_sides)
+    gg = GeomGrid(
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        h=h,
+        cpml=cpml_cells,
+        x0=x0,
+        cpml_slabs=slabs,
+        cfg=cfg,
+        rigid_sides=rigid_sides,
+        planes=planes,
+        h_nominal=h_nominal,
+    )
 
     derived = Derived(
         f_max=f_max,
@@ -216,7 +374,7 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
         run_time_s=run_time_s,
         n_steps=n_steps,
         ppw_realized=ppw_realized,
-        cpml_sides=CPML_SIDES_ALL,
+        cpml_sides=tuple(cpml_sides),
         geometry="parametric",
         cell_budget_exceeded=cell_budget_exceeded,
         decimation_m=decimation_m,
@@ -244,9 +402,6 @@ def validate_geom(
     num = cfg.numerics
 
     spec = cfg.geometry_spec
-    if spec is not None and spec.environment.planes:
-        errors.append("environment planes land in v0.3 step 7")
-
     if derived.memory_bytes > ram_limit_bytes:
         errors.append(
             f"estimated memory {derived.memory_bytes / 1e9:.2f} GB exceeds "

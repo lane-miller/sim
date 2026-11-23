@@ -1,0 +1,54 @@
+{
+  "geometry": "parametric",
+  "air": {
+    "c": 343.0,
+    "rho": 1.204
+  },
+  "box": null,
+  "band": {
+    "f_min": 50.0,
+    "f_max": 3000.0
+  },
+  "numerics": {
+    "h_override": 0.005,
+    "cells_across_radiator": 10,
+    "cfl_safety": 0.99,
+    "gap_cells": null,
+    "cpml_cells": 16,
+    "cpml_alpha_factor": 1.0,
+    "cpml_m": 3.0,
+    "cpml_R": 1e-6,
+    "cpml_kappa_max": 1.0,
+    "cell_budget": 60000000,
+    "pulse_db": -40.0,
+    "pulse_f_factor": 1.2,
+    "n_transits": 14.0,
+    "min_edge_cells": 3
+  },
+  "output": {
+    "path": ""
+  },
+  "environment": {
+    "planes": [
+      {"axis": "x", "side": "-", "offset": 0.0},
+      {"axis": "y", "side": "-", "offset": 0.0}
+    ]
+  },
+  "parts": [
+    {
+      "box": {"size": [0.1, 0.075, 0.25]},
+      "position": [0.05, 0.0375, -0.125],
+      "normal": [0.0, 0.0, 1.0],
+      "x_axis": [1.0, 0.0, 0.0]
+    }
+  ],
+  "radiators": [
+    {
+      "name": "radiator",
+      "rect": {"w": 0.04, "h": 0.03},
+      "position": [0.02, 0.015, 0.0],
+      "normal": [0.0, 0.0, 1.0],
+      "x_axis": [1.0, 0.0, 0.0]
+    }
+  ]
+}

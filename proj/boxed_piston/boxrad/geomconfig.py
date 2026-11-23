@@ -81,8 +81,6 @@ class GeometrySpec:
 def check_geometry_v03_guards(cfg: Any) -> None:
     """Reject configs whose geometry features land in later v0.3 steps."""
     spec = cfg.geometry_spec
-    if spec.environment.planes:
-        raise NotImplementedError("environment planes land in v0.3 step 7")
     if spec.tag == "parametric":
         return
     if spec.tag == "step":

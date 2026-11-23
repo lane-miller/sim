@@ -104,8 +104,9 @@ def test_s2_bookshelf_parse_and_guard() -> None:
     floor, wall = spec.environment.planes
     assert floor.axis == "z" and floor.side == "-" and floor.offset == pytest.approx(0.0)
     assert wall.axis == "y" and wall.side == "-" and wall.offset == pytest.approx(-0.425)
-    with pytest.raises(NotImplementedError, match="step 7"):
-        run(Config.from_json(json.dumps(data)), dry_run=True, progress=False)
+    summary = run(Config.from_json(json.dumps(data)), dry_run=True, progress=False)
+    assert isinstance(summary, dict)
+    assert summary.get("geometry") == "parametric"
 
 
 @pytest.mark.parametrize(
@@ -256,5 +257,5 @@ def test_box_environment_dry_run_not_implemented(tmp_path: Path) -> None:
     data = json.loads(text)
     data["environment"] = {"planes": [{"axis": "z", "side": "-", "offset": 0.0}]}
     cfg = Config.from_dict(data)
-    with pytest.raises(NotImplementedError, match="step 7"):
-        run(cfg, out_path=tmp_path / "dry.h5", dry_run=True, progress=False)
+    summary = run(cfg, out_path=tmp_path / "dry.h5", dry_run=True, progress=False)
+    assert isinstance(summary, dict)

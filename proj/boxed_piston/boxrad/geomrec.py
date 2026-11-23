@@ -15,7 +15,7 @@ from boxrad.geom.geometry import Geometry
 from boxrad.geomderive import GeomGrid
 from boxrad.grid import Fields
 from boxrad.post.finalize import compute_finalize_results, write_finalize_meta
-from boxrad.post.kirchhoff import huygens_box_patches
+from boxrad.post.kirchhoff import SurfacePatches, huygens_box_patches
 from boxrad.recorder import (
     _CONVENTIONS,
     _ChunkWriter,
@@ -143,6 +143,130 @@ def _build_huygens_gathers(
     return idx4, idx_v, sgn_v, v_axis
 
 
+def validate_huygens_clearance_geom(
+    derived: Derived,
+    offset_cells: int,
+    rigid_sides: dict[str, bool],
+) -> None:
+    """Require ``gap_cells − offset ≥ 2`` on each absorbing side only."""
+    if offset_cells < 2:
+        raise ValueError(
+            f"huygens offset {offset_cells} cells < 2 (stencil needs two p cells each side)"
+        )
+    gap = derived.gap_cells
+    for axis, (neg, pos) in enumerate((("x", "x"), ("y", "y"), ("z", "z"))):
+        if not rigid_sides.get(f"{neg}-", False):
+            clearance = gap - offset_cells
+            if clearance < 2:
+                raise ValueError(
+                    f"huygens offset {offset_cells} leaves {clearance} cells to CPML/gap "
+                    f"on {neg}- (need ≥ 2; gap_cells={gap})"
+                )
+        if not rigid_sides.get(f"{pos}+", False):
+            clearance = gap - offset_cells
+            if clearance < 2:
+                raise ValueError(
+                    f"huygens offset {offset_cells} leaves {clearance} cells to CPML/gap "
+                    f"on {pos}+ (need ≥ 2; gap_cells={gap})"
+                )
+
+
+def huygens_patches_planes(
+    lo_s: np.ndarray,
+    hi_s: np.ndarray,
+    h: float,
+    offset_cells: int,
+    rigid_sides: dict[str, bool],
+    domain_lo: np.ndarray,
+    domain_hi: np.ndarray,
+) -> SurfacePatches:
+    """Open or closed Huygens patches; rigid sides omit a face and extend laterals to the plane."""
+    _ = domain_lo, domain_hi
+    lo_s = np.asarray(lo_s, dtype=_F64).reshape(3)
+    hi_s = np.asarray(hi_s, dtype=_F64).reshape(3)
+    pad = float(offset_cells) * float(h)
+    w = hi_s - lo_s
+
+    if not any(rigid_sides.get(k, False) for k in rigid_sides):
+        return huygens_box_patches(
+            float(w[0]),
+            float(w[1]),
+            float(w[2]),
+            h,
+            tuple(lo_s.tolist()),
+            offset_cells=offset_cells,
+        )
+
+    def _face_lo(axis: int) -> float:
+        key = f"{('x', 'y', 'z')[axis]}-"
+        if rigid_sides.get(key, False):
+            return float(lo_s[axis])
+        return float(lo_s[axis]) - pad
+
+    def _face_hi(axis: int) -> float:
+        key = f"{('x', 'y', 'z')[axis]}+"
+        if rigid_sides.get(key, False):
+            return float(hi_s[axis])
+        return float(hi_s[axis]) + pad
+
+    ox, ox2 = _face_lo(0), _face_hi(0)
+    oy, oy2 = _face_lo(1), _face_hi(1)
+    oz, oz2 = _face_lo(2), _face_hi(2)
+    wx, wy, wz = ox2 - ox, oy2 - oy, oz2 - oz
+    h = float(h)
+
+    def _axis_centers(x0: float, length: float) -> np.ndarray:
+        n = max(1, int(round(length / h)))
+        return x0 + (np.arange(n, dtype=_F64) + 0.5) * h
+
+    xs_in = _axis_centers(ox, wx)
+    ys_in = _axis_centers(oy, wy)
+    zs_in = _axis_centers(oz, wz)
+
+    centers_list: list[np.ndarray] = []
+    normals_list: list[np.ndarray] = []
+    areas_list: list[float] = []
+    ex = np.array([1.0, 0.0, 0.0], dtype=_F64)
+    ey = np.array([0.0, 1.0, 0.0], dtype=_F64)
+    ez = np.array([0.0, 0.0, 1.0], dtype=_F64)
+
+    def _add_face(
+        fixed_coord: float,
+        axis_fixed: int,
+        u_centers: np.ndarray,
+        v_centers: np.ndarray,
+        normal: np.ndarray,
+    ) -> None:
+        nu, nv = len(u_centers), len(v_centers)
+        pts = np.zeros((nu * nv, 3), dtype=_F64)
+        tang = [i for i in range(3) if i != axis_fixed]
+        uu, vv = np.meshgrid(u_centers, v_centers, indexing="ij")
+        pts[:, axis_fixed] = fixed_coord
+        pts[:, tang[0]] = uu.ravel()
+        pts[:, tang[1]] = vv.ravel()
+        centers_list.append(pts)
+        normals_list.append(np.tile(normal, (nu * nv, 1)))
+        areas_list.extend([h * h] * (nu * nv))
+
+    if not rigid_sides.get("x-", False):
+        _add_face(ox, 0, ys_in, zs_in, -ex)
+    if not rigid_sides.get("x+", False):
+        _add_face(ox2, 0, ys_in, zs_in, ex)
+    if not rigid_sides.get("y-", False):
+        _add_face(oy, 1, xs_in, zs_in, -ey)
+    if not rigid_sides.get("y+", False):
+        _add_face(oy2, 1, xs_in, zs_in, ey)
+    if not rigid_sides.get("z-", False):
+        _add_face(oz, 2, xs_in, ys_in, -ez)
+    if not rigid_sides.get("z+", False):
+        _add_face(oz2, 2, xs_in, ys_in, ez)
+
+    centers = np.vstack(centers_list)
+    normals = np.vstack(normals_list)
+    areas = np.asarray(areas_list, dtype=_F64)
+    return SurfacePatches(centers=centers, normals=normals, areas=areas, h=h)
+
+
 def validate_huygens_patches_geom(gg: GeomGrid, patches) -> None:
     """Raise ``ValueError`` if any Huygens stencil lies in CPML or outside the grid."""
     slabs = gg.cpml_slabs
@@ -221,7 +345,11 @@ class GeomRecorder:
     ) -> None:
         h5 = _require_h5py()
         offset = resolve_huygens_offset(cfg) if offset_cells is None else int(offset_cells)
-        validate_huygens_clearance(derived, offset, geometry="box")
+        rigid_sides = dict(gg.rigid_sides or {})
+        if rigid_sides:
+            validate_huygens_clearance_geom(derived, offset, rigid_sides)
+        else:
+            validate_huygens_clearance(derived, offset, geometry="box")
 
         self.cfg = cfg
         self.derived = derived
@@ -239,17 +367,27 @@ class GeomRecorder:
 
         h = self.h
         gap_cpml = (derived.gap_cells + derived.cpml_cells) * h
-        lo_s = np.asarray(gg.x0, dtype=_F64) + gap_cpml
-        w_box = float(derived.realized_W)
-        h_box = float(derived.realized_H)
-        d_box = float(derived.realized_D)
-        huygens_patches = huygens_box_patches(
-            w_box,
-            h_box,
-            d_box,
-            h,
+        lo_s = np.asarray(gg.x0, dtype=_F64) + gap_cpml * (
+            np.array(
+                [
+                    0.0 if rigid_sides.get("x-", False) else 1.0,
+                    0.0 if rigid_sides.get("y-", False) else 1.0,
+                    0.0 if rigid_sides.get("z-", False) else 1.0,
+                ],
+                dtype=_F64,
+            )
+        )
+        hi_s = lo_s + np.array([derived.realized_W, derived.realized_H, derived.realized_D], dtype=_F64)
+        domain_lo = np.asarray(gg.x0, dtype=_F64)
+        domain_hi = domain_lo + np.array([gg.nx, gg.ny, gg.nz], dtype=_F64) * h
+        huygens_patches = huygens_patches_planes(
             lo_s,
-            offset_cells=offset,
+            hi_s,
+            h,
+            offset,
+            rigid_sides,
+            domain_lo,
+            domain_hi,
         )
         (
             self._huygens_idx4,
@@ -328,7 +466,39 @@ class GeomRecorder:
         centers = np.empty((n, 3), dtype=_F64)
         shape = (gg.nx, gg.ny, gg.nz)
         beta_flat = beta_tilde.reshape(-1)
+        x0 = gg.x0.astype(_F64)
+        h = gg.h
+        domain_hi = x0 + np.array([gg.nx, gg.ny, gg.nz], dtype=_F64) * h
+        planes = list(self.geometry.planes)
+
+        def _behind_plane(xv: float, yv: float, zv: float) -> str | None:
+            pxyz = (xv, yv, zv)
+            for pl in planes:
+                ax = {"x": 0, "y": 1, "z": 2}[pl.axis]
+                if pl.side == "-" and pxyz[ax] < float(pl.offset) - 0.5 * h:
+                    return f"{pl.axis}{pl.side} at offset {pl.offset}"
+                if pl.side == "+" and pxyz[ax] > float(pl.offset) + 0.5 * h:
+                    return f"{pl.axis}{pl.side} at offset {pl.offset}"
+            return None
+
         for q, (x, y, z) in enumerate(targets):
+            behind = _behind_plane(x, y, z)
+            if behind is not None:
+                raise ValueError(
+                    f"probe {q} at ({x},{y},{z}) is behind rigid plane {behind}"
+                )
+            if (
+                x < float(x0[0])
+                or y < float(x0[1])
+                or z < float(x0[2])
+                or x >= float(domain_hi[0])
+                or y >= float(domain_hi[1])
+                or z >= float(domain_hi[2])
+            ):
+                raise ValueError(
+                    f"probe {q} at ({x},{y},{z}) lies outside the FDTD domain "
+                    f"[{x0[0]},{domain_hi[0]})×[{x0[1]},{domain_hi[1]})×[{x0[2]},{domain_hi[2]})"
+                )
             i, j, k = _p_index_from_xyz(gg, x, y, z)
             flat = _assert_in_p(gg, i, j, k)
             if beta_flat[flat] == 0.0:
@@ -360,6 +530,12 @@ class GeomRecorder:
         meta.attrs["radiator0_x_axis"] = pose.R[:, 0].astype(_F64)
         meta.attrs["kernel_path"] = str(self.op_info["path"])
         meta.attrs["geom_stats_json"] = _geom_stats_json(self.op_info)
+        planes = list(self.gg.planes) if self.gg.planes else []
+        meta.attrs["environment_json"] = json.dumps(
+            [{"axis": p.axis, "side": p.side, "offset": float(p.offset)} for p in planes]
+        )
+        meta.attrs["n_planes"] = int(len(planes))
+        meta.attrs["h_nominal"] = float(self.gg.h_nominal)
         meta.create_dataset(
             "config_json",
             data=np.asarray(self.cfg.to_json(), dtype="S"),

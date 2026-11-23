@@ -184,6 +184,11 @@ def seating_check(
     first_fail = None
     for q in samples:
         p = radiator.pose.to_world(np.array([q[0], q[1], 0.0], dtype=_F64))
+        if any(
+            abs(float(p["xyz".index(pl.axis)]) - float(pl.offset)) <= 1e-9
+            for pl in (geometry.planes or ())
+        ):
+            continue
         pin = geometry.inside(p - eps * n_hat)
         pout = geometry.inside(p + eps * n_hat)
         if not pin or pout:

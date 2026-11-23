@@ -195,8 +195,9 @@ def test_dry_run_showcases(capsys: pytest.CaptureFixture[str]) -> None:
     assert "held rigid" in err
     s6 = dry_run_geom(_load_showcase("s6_downfire.json"))
     assert s6["clearances_m"].get("woofer", 0.0) == pytest.approx(0.030, rel=0.02)
-    with pytest.raises(NotImplementedError, match="step 7"):
-        run(_load_showcase("s2_bookshelf.json"), dry_run=True, progress=False)
+    s2 = dry_run_geom(_load_showcase("s2_bookshelf.json"))
+    assert isinstance(s2, dict)
+    assert s2.get("geometry") == "parametric"
 
 
 def test_guard_s1_dry_run_dict() -> None:
