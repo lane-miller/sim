@@ -89,6 +89,45 @@ def _symmetry_gates(full: Path, half: Path, quarter: Path) -> dict[str, Any]:
     }
 
 
+_PLANE_AXIS = {"x": 0, "y": 1, "z": 2}
+
+
+def _woofer_position(cfg: Config) -> np.ndarray:
+    for rd in cfg.geometry_spec.radiators:
+        if rd.name == "woofer":
+            if rd.pose is None:
+                raise ValueError('S2 woofer has no pose/position')
+            return np.asarray(rd.pose.position, dtype=np.float64).reshape(3)
+    raise ValueError('S2 config has no radiator named "woofer"')
+
+
+def _plane_image_sources(cfg: Config, s: np.ndarray) -> list[np.ndarray]:
+    """One image per plane (reflect s) plus one image through all planes in order."""
+    planes = cfg.geometry_spec.environment.planes
+    images: list[np.ndarray] = []
+    s = np.asarray(s, dtype=np.float64).reshape(3)
+    for pl in planes:
+        sm = s.copy()
+        ax = _PLANE_AXIS[pl.axis]
+        sm[ax] = 2.0 * float(pl.offset) - float(s[ax])
+        images.append(sm)
+    both = s.copy()
+    for pl in planes:
+        ax = _PLANE_AXIS[pl.axis]
+        both[ax] = 2.0 * float(pl.offset) - both[ax]
+    images.append(both)
+    return images
+
+
+def _image_formula(s: np.ndarray, images: list[np.ndarray], f_hz: float, c: float) -> float:
+    k = 2.0 * math.pi * f_hz / c
+    approx = 1.0
+    for sm in images:
+        d_m = float(np.linalg.norm(s - sm))
+        approx += math.sin(k * d_m) / max(k * d_m, 1e-30)
+    return approx
+
+
 def _power_open(h5: Path) -> bool:
     with Result(h5) as res:
         rho = float(res.config.air.rho)
@@ -106,27 +145,23 @@ def _power_open(h5: Path) -> bool:
         return ok_all
 
 
-def _image_ratio_report(s2: Path, s2_free: Path) -> None:
-    freqs = [30.0, 50.0, 80.0, 120.0, 200.0, 400.0]
+def _image_ratio_report(s2: Path, s2_free: Path, s2_cfg: Config) -> None:
+    freqs = [50.0, 80.0, 120.0, 200.0, 400.0]
+    s = _woofer_position(s2_cfg)
+    images = _plane_image_sources(s2_cfg, s)
+    c = float(s2_cfg.air.c)
+    print("\nS2 image distances d_m (woofer center s = [{:.3g}, {:.3g}, {:.3g}])".format(*s))
+    for i, sm in enumerate(images):
+        d_m = float(np.linalg.norm(s - sm))
+        print(f"  image {i}: d_m = {d_m:.6g} m  (s_m = [{sm[0]:.3g}, {sm[1]:.3g}, {sm[2]:.3g}])")
+    print("\nS2 Re z ratio vs image formula (CHECK)")
+    print(f"{'f Hz':>8} {'Re zp/Re zf':>14} {'image approx':>14}")
     with Result(s2) as rp, Result(s2_free) as rf:
-        pos = np.asarray(rp.meta.get("radiator0_position", [0.0, 0.125, 0.10]), dtype=np.float64)
-        s = pos
-        images = (
-            np.array([s[0], s[1], -s[2]]),
-            np.array([s[0], -s[1], s[2]]),
-            np.array([s[0], -s[1], -s[2]]),
-        )
-        print("\nS2 Re z ratio vs image formula (CHECK)")
-        print(f"{'f Hz':>8} {'Re zp/Re zf':>14} {'image approx':>14}")
         for f_hz in freqs:
             _, zp = rp.z(f_hz)
             _, zf = rf.z(f_hz)
             ratio = float(np.real(zp[0]) / np.real(zf[0]))
-            k = 2.0 * math.pi * f_hz / 343.0
-            approx = 1.0
-            for sm in images:
-                d_m = float(np.linalg.norm(s - sm))
-                approx += math.sin(k * d_m) / max(k * d_m, 1e-30)
+            approx = _image_formula(s, images, f_hz, c)
             print(f"{f_hz:8.1f} {ratio:14.4g} {approx:14.4g}")
 
 
@@ -154,7 +189,7 @@ def main() -> int:
     gates["power_quarter"] = _power_open(paths["quarter"])
     gates["power_s2"] = _power_open(paths["s2"])
 
-    _image_ratio_report(paths["s2"], paths["s2_free"])
+    _image_ratio_report(paths["s2"], paths["s2_free"], s2)
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
     with Result(paths["c19_full"]) as r0, Result(paths["half"]) as r1, Result(paths["quarter"]) as r2:
@@ -174,31 +209,18 @@ def main() -> int:
         ax2.semilogy(t0f, np.maximum(np.abs(p0 - p2), 1e-30), color="C2", alpha=0.5, label="|Δ| quarter")
         ax.set_title("(a) p_avg symmetry")
 
-    freqs = np.geomspace(30.0, 400.0, 40)
+    freqs = np.geomspace(50.0, 400.0, 40)
+    s = _woofer_position(s2)
+    images = _plane_image_sources(s2, s)
+    c_s2 = float(s2.air.c)
     with Result(paths["s2"]) as rs, Result(paths["s2_free"]) as rf:
         ratios = []
         approx_line = []
-        s = np.asarray(rs.meta.get("radiator0_position", [0.0, 0.125, 0.10]), dtype=np.float64)
-        for sm in (
-            np.array([s[0], s[1], -s[2]]),
-            np.array([s[0], -s[1], s[2]]),
-            np.array([s[0], -s[1], -s[2]]),
-        ):
-            _ = sm
         for f_hz in freqs:
             _, zp = rs.z(f_hz)
             _, zf = rf.z(f_hz)
             ratios.append(float(np.real(zp[0]) / np.real(zf[0])))
-            k = 2.0 * math.pi * f_hz / 343.0
-            approx = 1.0
-            for sm in (
-                np.array([s[0], s[1], -s[2]]),
-                np.array([s[0], -s[1], s[2]]),
-                np.array([s[0], -s[1], -s[2]]),
-            ):
-                d_m = float(np.linalg.norm(s - sm))
-                approx += math.sin(k * d_m) / max(k * d_m, 1e-30)
-            approx_line.append(approx)
+            approx_line.append(_image_formula(s, images, float(f_hz), c_s2))
     ax = axes[1]
     ax.semilogx(freqs, ratios, label="S2 / S2-free")
     ax.semilogx(freqs, approx_line, "--", label="image sum")
