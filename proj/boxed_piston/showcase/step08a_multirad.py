@@ -99,11 +99,14 @@ def main() -> int:
     f1, z1, _, j1 = _read_z_row(sib)
     assert j0 == 0 and j1 == 1
     f_hz = f0
-    z00 = z0[:, 0]
-    z01 = z0[:, 1]
-    z10 = z1[:, 0]
-    z11 = z1[:, 1]
     s0, s1 = s_list[0], s_list[1]
+    # z_ij = pickup i in file j (radiator j driven); Z_ij = rho*c*z_ij / S_j
+    z00 = z0[:, 0]
+    z10 = z0[:, 1]
+    z01 = z1[:, 0]
+    z11 = z1[:, 1]
+    z00_imp = _Z(z00, s0)
+    z11_imp = _Z(z11, s1)
     z01_imp = _Z(z01, s1)
     z10_imp = _Z(z10, s0)
     num = np.abs(z01_imp - z10_imp)
@@ -124,36 +127,49 @@ def main() -> int:
     lf: dict[str, Any] = {}
     for f in lf_hz:
         i0 = int(np.argmin(np.abs(f_hz - f)))
-        ratio_10 = float(np.real(z01[i0]) / np.real(z00[i0])) if np.real(z00[i0]) != 0 else float("nan")
-        ratio_01 = float(np.real(z10[i0]) / np.real(z11[i0])) if np.real(z11[i0]) != 0 else float("nan")
+        re_z10_over_z00 = (
+            float(np.real(z10[i0]) / np.real(z00[i0])) if np.real(z00[i0]) != 0 else float("nan")
+        )
+        re_z01_over_z11 = (
+            float(np.real(z01[i0]) / np.real(z11[i0])) if np.real(z11[i0]) != 0 else float("nan")
+        )
         k = 2.0 * math.pi * f / _C
         sinc = math.sin(k * d_sep) / (k * d_sep) if abs(k * d_sep) > 1e-12 else 1.0
         lf[str(int(f))] = {
-            "Re_z01_over_Re_z00": ratio_10,
-            "Re_z10_over_Re_z11": ratio_01,
+            "Re_z10_over_Re_z00_drive0": re_z10_over_z00,
+            "Re_z01_over_Re_z11_drive1": re_z01_over_z11,
             "sinc_kd": sinc,
         }
     gates["low_f_mutual"] = lf
 
-    fig, axes = plt.subplots(2, 1, figsize=(9, 7))
-    ax = axes[0]
-    for label, z in (("Z00", _Z(z00, s0)), ("Z11", _Z(z11, s1)), ("Z01", z01_imp), ("Z10", z10_imp)):
-        ax.semilogx(f_hz, np.real(z), label=f"Re {label}")
-        ax.semilogx(f_hz, np.imag(z), ls="--", alpha=0.7, label=f"Im {label}")
-    ax.set_xlabel("f (Hz)")
-    ax.set_ylabel("Z (Pa·s/m³)")
-    ax.legend(fontsize=8, ncol=2)
-    ax.set_title("(a) mutual impedances")
+    fig, axes = plt.subplots(3, 1, figsize=(9, 9))
+    ax0 = axes[0]
+    for label, z in (("Z00", z00_imp), ("Z11", z11_imp)):
+        ax0.semilogx(f_hz, np.real(z), label=f"Re {label}")
+        ax0.semilogx(f_hz, np.imag(z), ls="--", alpha=0.7, label=f"Im {label}")
+    ax0.set_xlabel("f (Hz)")
+    ax0.set_ylabel("Z (Pa·s/m³)")
+    ax0.legend(fontsize=8, ncol=2)
+    ax0.set_title("(a) self impedances Z00, Z11")
 
-    ax2 = axes[1]
+    ax1 = axes[1]
+    for label, z in (("Z01", z01_imp), ("Z10", z10_imp)):
+        ax1.semilogx(f_hz, np.real(z), label=f"Re {label}")
+        ax1.semilogx(f_hz, np.imag(z), ls="--", alpha=0.7, label=f"Im {label}")
+    ax1.set_xlabel("f (Hz)")
+    ax1.set_ylabel("Z (Pa·s/m³)")
+    ax1.legend(fontsize=8, ncol=2)
+    ax1.set_title("(a) mutual impedances Z01, Z10")
+
+    ax2 = axes[2]
     sinc_line = []
     ratio_line = []
     for f in lf_hz:
         k = 2.0 * math.pi * f / _C
         sinc_line.append(math.sin(k * d_sep) / (k * d_sep) if abs(k * d_sep) > 1e-12 else 1.0)
         i0 = int(np.argmin(np.abs(f_hz - f)))
-        ratio_line.append(float(np.real(z01[i0]) / np.real(z00[i0])))
-    ax2.plot(lf_hz, ratio_line, "o-", label="Re z01 / Re z00")
+        ratio_line.append(float(np.real(z10[i0]) / np.real(z00[i0])))
+    ax2.plot(lf_hz, ratio_line, "o-", label="Re z10 / Re z00 (drive 0)")
     ax2.plot(lf_hz, sinc_line, "s--", label="sin(kd)/(kd)")
     ax2.set_xscale("log")
     ax2.set_xlabel("f (Hz)")
