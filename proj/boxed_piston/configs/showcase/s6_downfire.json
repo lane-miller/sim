@@ -26,7 +26,10 @@
     "min_edge_cells": 3
   },
   "output": {
-    "path": ""
+    "path": "",
+    "probes": [
+      [0.0, 0.0, 0.015]
+    ]
   },
   "parts": [
     {

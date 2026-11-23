@@ -41,6 +41,7 @@ _DI_THETA = 24
 _DI_PHI = 48
 _V_REF = 1.0
 _BAND_RTOL = 1e-9
+_POSE_RTOL = 1e-9
 
 
 def _require_h5py() -> Any:
@@ -59,8 +60,15 @@ class Result:
     ``ValueError`` for frequencies outside :attr:`band` unless called with
     ``allow_out_of_band=True`` (then it warns and evaluates anyway).
 
-    Coordinates: origin at the radiator center on the radiating face, ``+z``
-    outward; in box mode the box occupies ``z ∈ [−D, 0]``.
+    Coordinates depend on the ``frame`` keyword on :meth:`field`,
+    :meth:`directivity`, and :meth:`directivity_index` (default
+    :attr:`frame_default` = ``"local"``). Parametric files use the radiator-0
+    local frame by default: origin at the radiator center, ``+z`` outward along
+    the radiator normal, ``+x`` along the stored pose x-axis; phase is referenced
+    to that origin. ``frame="world"`` uses the config/world frame (stored
+    Huygens data and probe positions). Legacy box/baffle files have identity pose
+    so both frames agree. In box mode the box occupies ``z ∈ [−D, 0]`` in the
+    legacy radiator-local frame.
 
     The HDF5 file is opened read-only on first access and kept open until
     :meth:`close` (or the end of a ``with`` block).
@@ -72,6 +80,8 @@ class Result:
         FileNotFoundError: ``path`` is not an existing file.
         ImportError: h5py is not installed (raised on first data access).
     """
+
+    frame_default: Literal["local", "world"] = "local"
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -141,6 +151,51 @@ class Result:
     @cached_property
     def _grid(self) -> Grid:
         return Grid(self.config, self.derived)
+
+    @cached_property
+    def pose(self) -> tuple[np.ndarray, np.ndarray]:
+        """Radiator-0 rigid rotation ``R`` (local → world, float64 (3, 3)) and translation ``t`` (3,).
+
+        Parametric files store ``radiator0_x_axis``, ``radiator0_normal``, and
+        ``radiator0_position`` in ``/meta``; legacy box/baffle files return
+        identity rotation and zero translation.
+
+        Raises:
+            ValueError: Stored axes do not form a proper rotation (det ``R`` ≤ 0
+                or ``R`` is not orthonormal within ``1e-9``).
+        """
+        m = self.meta
+        keys = ("radiator0_x_axis", "radiator0_normal", "radiator0_position")
+        if not all(k in m for k in keys):
+            return np.eye(3, dtype=_F64), np.zeros(3, dtype=_F64)
+        x_hat = np.asarray(m["radiator0_x_axis"], dtype=_F64).reshape(3)
+        n_hat = np.asarray(m["radiator0_normal"], dtype=_F64).reshape(3)
+        t = np.asarray(m["radiator0_position"], dtype=_F64).reshape(3)
+        y_hat = np.cross(n_hat, x_hat)
+        r_mat = np.column_stack([x_hat, y_hat, n_hat])
+        err = float(np.max(np.abs(r_mat.T @ r_mat - np.eye(3, dtype=_F64))))
+        if err > _POSE_RTOL:
+            raise ValueError(
+                f"radiator0 pose is not orthonormal (max |RᵀR − I| = {err:.3g}, limit {_POSE_RTOL})"
+            )
+        if float(np.linalg.det(r_mat)) <= 0.0:
+            raise ValueError("radiator0 pose has non-positive determinant (not a rotation)")
+        return r_mat.astype(_F64, copy=False), t.astype(_F64, copy=False)
+
+    def _resolve_frame(self, frame: Literal["local", "world"] | None) -> Literal["local", "world"]:
+        if frame is None:
+            return self.frame_default
+        if frame not in ("local", "world"):
+            raise ValueError(f"frame must be 'local' or 'world', got {frame!r}")
+        return frame
+
+    def _points_local_to_world(self, pts: np.ndarray) -> np.ndarray:
+        r_mat, t = self.pose
+        return pts @ r_mat.T + t
+
+    def _dirs_local_to_world(self, dirs: np.ndarray) -> np.ndarray:
+        r_mat, _ = self.pose
+        return dirs @ r_mat.T
 
     @cached_property
     def S_grid(self) -> float:
@@ -325,6 +380,7 @@ class Result:
         points: np.ndarray | list,
         f: np.ndarray | float,
         *,
+        frame: Literal["local", "world"] | None = None,
         per: Literal["velocity", "volume_velocity"] = "velocity",
         allow_out_of_band: bool = False,
     ) -> np.ndarray:
@@ -335,13 +391,16 @@ class Result:
         surface plus its image in ``z = 0``), evaluated with a chunked,
         vectorized kernel. Points enclosed by the Huygens surface, or within
         ``h/2`` of one of its finite patches, use the FDTD record of an
-        ``output.probes`` probe whose cell center is within ``h/2``. Points in
-        the plane of a Huygens face but beyond its edges are ordinary exterior
-        points.
+        ``output.probes`` probe whose cell center is within ``h/2`` (probe
+        coordinates in the file are always world-frame). Points in the plane of a
+        Huygens face but beyond its edges are ordinary exterior points.
 
         Args:
-            points: ``(n_pts, 3)`` or ``(3,)`` coordinates in m.
+            points: ``(n_pts, 3)`` or ``(3,)`` coordinates in m in the frame
+                given by ``frame`` (default :attr:`frame_default`).
             f: Frequencies in Hz (scalar or array-like) inside :attr:`band`.
+            frame: ``"local"`` (radiator-0 frame) or ``"world"``; ``None`` uses
+                :attr:`frame_default`.
             per: ``"velocity"`` returns ``p/v`` in Pa/(m/s);
                 ``"volume_velocity"`` returns ``p/(S_grid v)`` in Pa/(m³/s).
             allow_out_of_band: Warn instead of raising for out-of-band ``f``.
@@ -356,13 +415,18 @@ class Result:
         """
         if per not in ("velocity", "volume_velocity"):
             raise ValueError(f"per must be 'velocity' or 'volume_velocity', got {per!r}")
+        frame_sel = self._resolve_frame(frame)
         f_arr = self._check_f(f, allow_out_of_band)
         pts = np.atleast_2d(np.asarray(points, dtype=_F64))
+        if frame_sel == "local":
+            pts_world = self._points_local_to_world(pts)
+        else:
+            pts_world = pts
         rho = float(self.config.air.rho)
         c = float(self.config.air.c)
         h = float(self.derived.h)
-        out = np.zeros((f_arr.size, pts.shape[0]), dtype=_C128)
-        probe_idx, _ = self._probe_hit(pts, h)
+        out = np.zeros((f_arr.size, pts_world.shape[0]), dtype=_C128)
+        probe_idx, _ = self._probe_hit(pts_world, h)
 
         file = self._file()
         has_probes = "probes" in file
@@ -376,10 +440,10 @@ class Result:
         for fi, f_hz in enumerate(f_arr):
             patches, v_ref, p_face, vn_face = self._huygens_at_f(float(f_hz))
             if close is None:
-                close = self._too_close_huygens(pts, patches)
+                close = self._too_close_huygens(pts_world, patches)
                 blocked = close & (probe_idx < 0)
                 if np.any(blocked):
-                    d_hy = distance_to_patches(pts[blocked], patches)
+                    d_hy = distance_to_patches(pts_world[blocked], patches)
                     msg_parts = [
                         "field evaluation inside or within h/2 of the Huygens surface; "
                         "add output.probes within h/2 of the target point or move outward"
@@ -393,7 +457,7 @@ class Result:
             free = ~close
             if np.any(free):
                 p_kh = kh_huygens_pressure_at_points(
-                    pts[free],
+                    pts_world[free],
                     patches,
                     p_face,
                     vn_face,
@@ -418,24 +482,28 @@ class Result:
         phi: np.ndarray | float,
         f: np.ndarray | float,
         *,
+        frame: Literal["local", "world"] | None = None,
         normalize: bool = False,
         allow_out_of_band: bool = False,
     ) -> np.ndarray:
         """Complex far-field pattern ``D(θ, φ, f) = lim_{r→∞} r e^{+jkr} p/v``.
 
         Evaluated as the Fraunhofer (r → ∞) KH amplitude of the stored Huygens
-        data. The phase is referenced to the coordinate origin (the radiator
-        center on the radiating face): at large ``r``,
-        ``p/v ≈ D(θ, φ) e^{−jkr}/r`` with ``r`` measured from the origin
-        (``e^{+jωt}`` convention). Use ``np.abs`` for the magnitude.
+        data. For ``frame="local"`` (default), θ and φ define directions in the
+        radiator-0 frame and the pattern includes the phase
+        ``exp(−jk (R r̂_ℓ)·t)`` so that :meth:`field` at
+        ``r r̂_ℓ`` matches ``D e^{−jkr}/r`` with ``r`` from the local origin. For
+        ``frame="world"``, θ and φ are in the world frame and phase is referenced
+        to the world origin.
 
         Args:
-            theta: Polar angle(s) from ``+z`` in radians.
+            theta: Polar angle(s) from ``+z`` in radians (in the chosen frame).
             phi: Azimuth(s) from ``+x`` toward ``+y`` in radians. Broadcast with
                 ``theta`` and flattened to ``n_dir`` directions.
             f: Frequencies in Hz (scalar or array-like) inside :attr:`band`.
-            normalize: If true, divide each frequency row by the complex on-axis
-                (θ = 0) value, so the on-axis entry is exactly ``1 + 0j``.
+            frame: ``"local"`` or ``"world"``; ``None`` uses :attr:`frame_default`.
+            normalize: If true, divide each frequency row by the on-axis value
+                (θ = 0 in the chosen frame: local ``+z`` or world ``+z``).
             allow_out_of_band: Warn instead of raising for out-of-band ``f``.
 
         Returns:
@@ -446,6 +514,7 @@ class Result:
         Raises:
             ValueError: Out-of-band ``f`` without ``allow_out_of_band``.
         """
+        frame_sel = self._resolve_frame(frame)
         f_arr = self._check_f(f, allow_out_of_band)
         th = np.atleast_1d(np.asarray(theta, dtype=_F64))
         ph = np.atleast_1d(np.asarray(phi, dtype=_F64))
@@ -453,10 +522,15 @@ class Result:
         th = np.ravel(th)
         ph = np.ravel(ph)
         st = np.sin(th)
-        dirs = np.column_stack([st * np.cos(ph), st * np.sin(ph), np.cos(th)])
-        n_dir = dirs.shape[0]
+        dirs_loc = np.column_stack([st * np.cos(ph), st * np.sin(ph), np.cos(th)])
+        n_dir = dirs_loc.shape[0]
         if normalize:
-            dirs = np.vstack([dirs, np.array([[0.0, 0.0, 1.0]], dtype=_F64)])
+            dirs_loc = np.vstack([dirs_loc, np.array([[0.0, 0.0, 1.0]], dtype=_F64)])
+        if frame_sel == "local":
+            dirs_kh = self._dirs_local_to_world(dirs_loc)
+        else:
+            dirs_kh = dirs_loc
+        _, t_pose = self.pose
         rho = float(self.config.air.rho)
         c = float(self.config.air.c)
         image_z = self._image_plane_z()
@@ -467,7 +541,7 @@ class Result:
             k_sel = np.asarray([2.0 * math.pi * float(f_hz) / c], dtype=_F64)
             dpdn = dpdn_from_vn(vn_face[np.newaxis, :], omega, rho)
             amp = kh_far_field(
-                dirs,
+                dirs_kh,
                 patches,
                 p_face[np.newaxis, :],
                 dpdn,
@@ -475,6 +549,10 @@ class Result:
                 image_plane_z=image_z,
             )[0]
             pat = amp / v_ref
+            if frame_sel == "local":
+                k = float(k_sel[0])
+                phase = np.exp(-1j * k * (dirs_kh @ t_pose))
+                pat = pat * phase
             if normalize:
                 axis_val = pat[-1]
                 if abs(axis_val) < 1e-300:
@@ -559,18 +637,22 @@ class Result:
         self,
         f: np.ndarray | float,
         *,
+        frame: Literal["local", "world"] | None = None,
         allow_out_of_band: bool = False,
     ) -> np.ndarray:
         """On-axis directivity index ``DI = 10 log₁₀(4π |p_axis|² / ∫ |p|² dΩ)``.
 
         ``p`` is the KH pressure on a sphere of radius ``50·max(W, H, D, h)``
-        (Gauss–Legendre 24 in cos θ × 48 uniform in φ, via
+        centered at the radiator origin in the chosen frame (local: :attr:`pose`
+        translation; world: coordinate origin). Quadrature uses directions in
+        that frame (Gauss–Legendre 24 in cos θ × 48 uniform in φ, via
         :func:`boxrad.post.directivity.di_from_pattern`). Box mode integrates the
         full sphere; baffle mode integrates only the physical half space
         ``z ≥ 0`` (conventional half-space DI, e.g. 3.01 dB for a small piston).
 
         Args:
             f: Frequencies in Hz (scalar or array-like) inside :attr:`band`.
+            frame: ``"local"`` or ``"world"``; ``None`` uses :attr:`frame_default``.
             allow_out_of_band: Warn instead of raising for out-of-band ``f``.
 
         Returns:
@@ -579,6 +661,7 @@ class Result:
         Raises:
             ValueError: Out-of-band ``f`` without ``allow_out_of_band``.
         """
+        frame_sel = self._resolve_frame(frame)
         f_arr = self._check_f(f, allow_out_of_band)
         rho = float(self.config.air.rho)
         c = float(self.config.air.c)
@@ -586,6 +669,7 @@ class Result:
         half_space = self.config.geometry == "baffle"
         d = self.derived
         r_far = 50.0 * max(d.realized_W, d.realized_H, d.realized_D, d.h)
+        r_mat, t_pose = self.pose
         out = np.zeros(f_arr.size, dtype=_F64)
         for fi, f_hz in enumerate(f_arr):
             patches, v_ref, p_face, vn_face = self._huygens_at_f(float(f_hz))
@@ -595,8 +679,13 @@ class Result:
             p_row = p_face[np.newaxis, :]
 
             def pattern(dirs: np.ndarray) -> np.ndarray:
+                if frame_sel == "local":
+                    dirs_w = dirs @ r_mat.T
+                    pts = t_pose + r_far * dirs_w
+                else:
+                    pts = r_far * dirs
                 return kh_pressure(
-                    r_far * dirs,
+                    pts,
                     patches,
                     p_row,
                     dpdn,
