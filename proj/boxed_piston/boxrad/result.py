@@ -350,9 +350,19 @@ class Result:
         if "probes" not in f:
             return np.full(points.shape[0], -1, dtype=np.int64), np.empty((0, 3), _F64)
         centers = np.asarray(f["probes/centers"][()], dtype=_F64)
+        requested = (
+            np.asarray(f["probes/requested"][()], dtype=_F64)
+            if "probes/requested" in f
+            else centers
+        )
         idx = np.full(points.shape[0], -1, dtype=np.int64)
         half = 0.5 * float(h)
         for m, pt in enumerate(points):
+            d_req = np.linalg.norm(requested - pt, axis=1)
+            j = int(np.argmin(d_req))
+            if d_req[j] <= 1e-9:
+                idx[m] = j
+                continue
             d = np.linalg.norm(centers - pt, axis=1)
             j = int(np.argmin(d))
             if d[j] <= half:
