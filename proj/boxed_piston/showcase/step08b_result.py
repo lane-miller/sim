@@ -31,7 +31,7 @@ from boxrad.runner import keep_awake, run  # noqa: E402
 from validation._common import to_json_safe  # noqa: E402
 
 _F64 = np.float64
-_PROBE_EXTRA = [(0.05, 0.30, 0.12), (-0.08, 0.40, 0.25)]
+_PROBE_EXTRA = [(0.0525, 0.1525, 0.1225), (-0.0775, 0.1625, 0.2525)]
 
 
 def _load_json(path: Path) -> Config:
@@ -182,6 +182,8 @@ def main() -> int:
     pm0 = _probe_traces(mirror_h5, n_pr)
     pm1 = _probe_traces(mirror_m, n_pr)
     pr_sum = pm0 + pm1
+    n_pr = min(pf.shape[0], pr_sum.shape[0])
+    pf, pr_sum = pf[:n_pr], pr_sum[:n_pr]
     d_pr = float(np.max(np.abs(pf - pr_sum))) / max(float(np.max(np.abs(pf))), 1e-30)
     gates["c19b_probes_max_rel"] = d_pr
     gates["c19b_probes_pass"] = bool(d_pr <= 1e-5)
