@@ -291,22 +291,3 @@ def test_rigid_edge_vx_zero() -> None:
     run = simulate_geom(copy.deepcopy(half), n_steps=150)
     vx0 = run.fields.vx[0, :, :]
     assert float(np.max(np.abs(vx0))) == 0.0
-
-
-def test_result_planes_kh_guard(tmp_path: Path) -> None:
-    half = _load("c19_half_x.json")
-    out = tmp_path / "half.h5"
-    from boxrad.geomrec import GeomRecorder
-    from boxrad.geomrun import step_geom
-
-    run = prepare_geom_run(half)
-    n = 80
-    rec = GeomRecorder(half, run.derived, run.gg, run.geometry, run.info, out, buffer_samples=32)
-    for step in range(n):
-        step_geom(run, step)
-        rec.sample(run.fields, step)
-    rec.close()
-    with Result(out) as res:
-        assert len(res.planes) == 1
-        with pytest.raises(NotImplementedError, match="7b"):
-            res.field([1.0, 0.0, 0.2], 100.0)

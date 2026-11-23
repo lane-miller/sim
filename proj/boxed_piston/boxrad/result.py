@@ -22,6 +22,12 @@ from boxrad.post.kirchhoff import (
     kh_far_field,
     kh_pressure,
 )
+from boxrad.post.images import (
+    direction_open,
+    expand_patches,
+    first_plane_violation,
+    in_fluid,
+)
 from boxrad.post.transfer import (
     kh_huygens_pressure_at_points,
     load_box_surface_spectrum,
@@ -75,6 +81,8 @@ class Result:
 
     Args:
         path: Path to an HDF5 file written by :func:`boxrad.run`.
+        frame: Default coordinate frame for :meth:`field`, :meth:`directivity`, and
+            :meth:`directivity_index` (per-call ``frame=`` overrides).
 
     Raises:
         FileNotFoundError: ``path`` is not an existing file.
@@ -83,10 +91,18 @@ class Result:
 
     frame_default: Literal["local", "world"] = "local"
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        frame: Literal["local", "world"] = "local",
+    ) -> None:
         self.path = Path(path)
         if not self.path.is_file():
             raise FileNotFoundError(self.path)
+        if frame not in ("local", "world"):
+            raise ValueError(f"frame must be 'local' or 'world', got {frame!r}")
+        self.frame_default = frame
         self._h5: Any | None = None
         self._spectra_cache: dict[float, tuple[SurfacePatches, complex, np.ndarray, np.ndarray]] = {}
 
@@ -209,9 +225,38 @@ class Result:
             return list(raw)
         return []
 
-    def _guard_planes_kh(self) -> None:
-        if self.planes:
-            raise NotImplementedError("image KH lands in v0.3 step 7b")
+    def _expand_huygens(
+        self,
+        patches: SurfacePatches,
+        p_face: np.ndarray,
+        vn_face: np.ndarray,
+    ) -> tuple[SurfacePatches, np.ndarray, np.ndarray]:
+        if not self.planes:
+            return patches, p_face, vn_face
+        return expand_patches(patches, self.planes, p_face, vn_face)  # type: ignore[return-value]
+
+    def _on_axis_world(self, frame_sel: Literal["local", "world"]) -> np.ndarray:
+        """Unit +z in the evaluation frame, expressed in world coordinates."""
+        if frame_sel == "world":
+            return np.array([0.0, 0.0, 1.0], dtype=_F64)
+        r_mat, _ = self.pose
+        return (r_mat @ np.array([0.0, 0.0, 1.0], dtype=_F64)).astype(_F64, copy=False)
+
+    def _apply_rigid_plane_bounds(
+        self,
+        lo: np.ndarray,
+        hi: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        lo = lo.copy()
+        hi = hi.copy()
+        for pl in self.planes:
+            ax = {"x": 0, "y": 1, "z": 2}[str(pl["axis"])]
+            off = float(pl["offset"])
+            if pl["side"] == "-":
+                lo[ax] = off
+            else:
+                hi[ax] = off
+        return lo, hi
 
     @cached_property
     def S_grid(self) -> float:
@@ -390,6 +435,8 @@ class Result:
 
         The enclosed region is the box spanned by the patch centers (box mode),
         or that box with its bottom on the baffle plane ``z = 0`` (baffle mode).
+        Parametric runs with ``environment`` planes extend the enclosed box to each
+        rigid plane on the fluid side (as baffle mode does for ``z = 0``).
         """
         half = 0.5 * float(patches.h)
         lo = patches.centers.min(axis=0)
@@ -397,6 +444,8 @@ class Result:
         if self.config.geometry == "baffle":
             lo = lo.copy()
             lo[2] = 0.0
+        elif self.planes:
+            lo, hi = self._apply_rigid_plane_bounds(lo, hi)
         inside = np.all((points > lo) & (points < hi), axis=1)
         near = distance_to_patches(points, patches) < half
         return inside | near
@@ -414,12 +463,15 @@ class Result:
 
         Points outside the Huygens surface use KH on the stored Huygens ``p`` and
         ``v_n`` (box mode: closed six-face surface; baffle mode: open five-face
-        surface plus its image in ``z = 0``), evaluated with a chunked,
-        vectorized kernel. Points enclosed by the Huygens surface, or within
-        ``h/2`` of one of its finite patches, use the FDTD record of an
-        ``output.probes`` probe whose cell center is within ``h/2`` (probe
-        coordinates in the file are always world-frame). Points in the plane of a
-        Huygens face but beyond its edges are ordinary exterior points.
+        surface plus its image in ``z = 0``; parametric files with
+        :attr:`planes` expand the open Huygens data over all plane-reflection
+        copies and integrate as a closed surface with no separate image Green's
+        function). Points enclosed by the Huygens surface, or within ``h/2`` of
+        one of its finite patches, use the FDTD record of an ``output.probes``
+        probe whose cell center is within ``h/2`` (probe coordinates in the file
+        are always world-frame). Points in the plane of a Huygens face but beyond
+        its edges are ordinary exterior points. World-frame points behind a rigid
+        environment plane raise ``ValueError`` naming that plane.
 
         Args:
             points: ``(n_pts, 3)`` or ``(3,)`` coordinates in m in the frame
@@ -441,7 +493,6 @@ class Result:
         """
         if per not in ("velocity", "volume_velocity"):
             raise ValueError(f"per must be 'velocity' or 'volume_velocity', got {per!r}")
-        self._guard_planes_kh()
         frame_sel = self._resolve_frame(frame)
         f_arr = self._check_f(f, allow_out_of_band)
         pts = np.atleast_2d(np.asarray(points, dtype=_F64))
@@ -449,6 +500,15 @@ class Result:
             pts_world = self._points_local_to_world(pts)
         else:
             pts_world = pts
+        if self.planes:
+            fluid = in_fluid(pts_world, self.planes)
+            if not np.all(fluid):
+                for m in np.nonzero(~fluid)[0]:
+                    pt = pts_world[m]
+                    viol = first_plane_violation(pt, self.planes)
+                    raise ValueError(
+                        f"field point {m} at ({pt[0]},{pt[1]},{pt[2]}) is behind rigid plane {viol}"
+                    )
         rho = float(self.config.air.rho)
         c = float(self.config.air.c)
         h = float(self.derived.h)
@@ -462,7 +522,7 @@ class Result:
             p_ts = np.asarray(file["probes/p"][()], dtype=_F64)
 
         geom = self.config.geometry
-        kh_geom = "box" if geom == "parametric" else geom
+        kh_geom = "box" if geom == "parametric" or self.planes else geom
         close: np.ndarray | None = None
         for fi, f_hz in enumerate(f_arr):
             patches, v_ref, p_face, vn_face = self._huygens_at_f(float(f_hz))
@@ -483,11 +543,14 @@ class Result:
                     raise ValueError("\n".join(msg_parts))
             free = ~close
             if np.any(free):
+                patches_kh, p_kh_face, vn_kh_face = self._expand_huygens(
+                    patches, p_face, vn_face
+                )
                 p_kh = kh_huygens_pressure_at_points(
                     pts_world[free],
-                    patches,
-                    p_face,
-                    vn_face,
+                    patches_kh,
+                    p_kh_face,
+                    vn_kh_face,
                     float(f_hz),
                     rho,
                     c,
@@ -512,6 +575,7 @@ class Result:
         frame: Literal["local", "world"] | None = None,
         normalize: bool = False,
         allow_out_of_band: bool = False,
+        allow_masked: bool = False,
     ) -> np.ndarray:
         """Complex far-field pattern ``D(θ, φ, f) = lim_{r→∞} r e^{+jkr} p/v``.
 
@@ -521,7 +585,10 @@ class Result:
         ``exp(−jk (R r̂_ℓ)·t)`` so that :meth:`field` at
         ``r r̂_ℓ`` matches ``D e^{−jkr}/r`` with ``r`` from the local origin. For
         ``frame="world"``, θ and φ are in the world frame and phase is referenced
-        to the world origin.
+        to the world origin. Parametric files with :attr:`planes` expand the
+        Huygens data over all reflection copies; directions not in the open
+        acoustic region raise ``ValueError``, or become NaN when
+        ``allow_masked=True`` (ignored when there are no planes).
 
         Args:
             theta: Polar angle(s) from ``+z`` in radians (in the chosen frame).
@@ -532,6 +599,8 @@ class Result:
             normalize: If true, divide each frequency row by the on-axis value
                 (θ = 0 in the chosen frame: local ``+z`` or world ``+z``).
             allow_out_of_band: Warn instead of raising for out-of-band ``f``.
+            allow_masked: With :attr:`planes`, write NaN for directions behind a
+                rigid plane instead of raising (ignored when there are no planes).
 
         Returns:
             Complex128 ``(n_f, n_dir)`` in Pa·m/(m/s), or dimensionless when
@@ -539,9 +608,11 @@ class Result:
             (``θ > π/2`` returns the mirror image).
 
         Raises:
-            ValueError: Out-of-band ``f`` without ``allow_out_of_band``.
+            ValueError: Out-of-band ``f`` without ``allow_out_of_band``; a
+                direction or on-axis (with ``normalize=True``) is not in the open
+                region when :attr:`planes` is non-empty and ``allow_masked`` is
+                false.
         """
-        self._guard_planes_kh()
         frame_sel = self._resolve_frame(frame)
         f_arr = self._check_f(f, allow_out_of_band)
         th = np.atleast_1d(np.asarray(theta, dtype=_F64))
@@ -552,19 +623,34 @@ class Result:
         st = np.sin(th)
         dirs_loc = np.column_stack([st * np.cos(ph), st * np.sin(ph), np.cos(th)])
         n_dir = dirs_loc.shape[0]
+        on_axis_loc = np.array([[0.0, 0.0, 1.0]], dtype=_F64)
         if normalize:
-            dirs_loc = np.vstack([dirs_loc, np.array([[0.0, 0.0, 1.0]], dtype=_F64)])
+            dirs_loc = np.vstack([dirs_loc, on_axis_loc])
         if frame_sel == "local":
             dirs_kh = self._dirs_local_to_world(dirs_loc)
         else:
             dirs_kh = dirs_loc
+        open_mask: np.ndarray | None = None
+        if self.planes:
+            open_mask = direction_open(dirs_kh, self.planes)
+            if normalize and not bool(open_mask[-1]):
+                raise ValueError(
+                    "normalize=True but the on-axis direction is not in the open "
+                    "acoustic region defined by environment planes"
+                )
+            if not allow_masked and not np.all(open_mask):
+                raise ValueError(
+                    "directivity direction(s) not in the open acoustic region "
+                    "defined by environment planes"
+                )
         _, t_pose = self.pose
         rho = float(self.config.air.rho)
         c = float(self.config.air.c)
-        image_z = self._image_plane_z()
+        image_z = None if self.planes else self._image_plane_z()
         out = np.zeros((f_arr.size, n_dir), dtype=_C128)
         for fi, f_hz in enumerate(f_arr):
             patches, v_ref, p_face, vn_face = self._huygens_at_f(float(f_hz))
+            patches, p_face, vn_face = self._expand_huygens(patches, p_face, vn_face)
             omega = np.asarray([2.0 * math.pi * float(f_hz)], dtype=_F64)
             k_sel = np.asarray([2.0 * math.pi * float(f_hz) / c], dtype=_F64)
             dpdn = dpdn_from_vn(vn_face[np.newaxis, :], omega, rho)
@@ -581,12 +667,17 @@ class Result:
                 k = float(k_sel[0])
                 phase = np.exp(-1j * k * (dirs_kh @ t_pose))
                 pat = pat * phase
+            if open_mask is not None and allow_masked:
+                pat = pat.copy()
+                pat[~open_mask] = np.nan + 0j
             if normalize:
                 axis_val = pat[-1]
                 if abs(axis_val) < 1e-300:
                     axis_val = 1e-300 + 0j
                 pat = pat[:n_dir] / axis_val
-            out[fi] = pat
+            elif open_mask is not None and allow_masked:
+                pat = pat[:n_dir]
+            out[fi] = pat[:n_dir]
         return out
 
     def surface_p(
@@ -677,6 +768,11 @@ class Result:
         :func:`boxrad.post.directivity.di_from_pattern`). Box mode integrates the
         full sphere; baffle mode integrates only the physical half space
         ``z ≥ 0`` (conventional half-space DI, e.g. 3.01 dB for a small piston).
+        Parametric files with :attr:`planes` expand the Huygens data, integrate
+        over the full sphere (``half_space=False``), then add
+        ``10 log₁₀ 2^{n_p}`` (e.g. 6.02 dB in a quarter space with two planes).
+        The on-axis direction must lie in the open region or ``ValueError`` is
+        raised.
 
         Args:
             f: Frequencies in Hz (scalar or array-like) inside :attr:`band`.
@@ -687,21 +783,33 @@ class Result:
             Float64 ``(n_f,)`` in dB.
 
         Raises:
-            ValueError: Out-of-band ``f`` without ``allow_out_of_band``.
+            ValueError: Out-of-band ``f`` without ``allow_out_of_band``; or the
+                on-axis direction is not in the open acoustic region when
+                :attr:`planes` is non-empty.
         """
-        self._guard_planes_kh()
         frame_sel = self._resolve_frame(frame)
         f_arr = self._check_f(f, allow_out_of_band)
+        if self.planes:
+            axis_w = self._on_axis_world(frame_sel)
+            if not bool(direction_open(axis_w.reshape(1, 3), self.planes)[0]):
+                raise ValueError(
+                    "directivity_index on-axis direction is not in the open "
+                    "acoustic region defined by environment planes"
+                )
         rho = float(self.config.air.rho)
         c = float(self.config.air.c)
-        image_z = self._image_plane_z()
-        half_space = self.config.geometry == "baffle"
+        image_z = None if self.planes else self._image_plane_z()
+        half_space = False if self.planes else self.config.geometry == "baffle"
+        di_plane = (
+            10.0 * math.log10(float(1 << len(self.planes))) if self.planes else 0.0
+        )
         d = self.derived
         r_far = 50.0 * max(d.realized_W, d.realized_H, d.realized_D, d.h)
         r_mat, t_pose = self.pose
         out = np.zeros(f_arr.size, dtype=_F64)
         for fi, f_hz in enumerate(f_arr):
             patches, v_ref, p_face, vn_face = self._huygens_at_f(float(f_hz))
+            patches, p_face, vn_face = self._expand_huygens(patches, p_face, vn_face)
             omega = np.asarray([2.0 * math.pi * float(f_hz)], dtype=_F64)
             k_sel = np.asarray([2.0 * math.pi * float(f_hz) / c], dtype=_F64)
             dpdn = dpdn_from_vn(vn_face[np.newaxis, :], omega, rho)
@@ -723,5 +831,5 @@ class Result:
                     near_subdivide=False,
                 )[0] / v_ref
 
-            out[fi] = di_from_pattern(pattern, half_space, _DI_THETA, _DI_PHI)
+            out[fi] = di_from_pattern(pattern, half_space, _DI_THETA, _DI_PHI) + di_plane
         return np.atleast_1d(out)
