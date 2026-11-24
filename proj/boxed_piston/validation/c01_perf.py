@@ -38,6 +38,7 @@ from boxrad.config import (  # noqa: E402
     Output,
     Radiator,
     SQRT3,
+    cfl_for_legacy_derive,
     derive,
     estimate_memory_bytes,
 )
@@ -126,7 +127,7 @@ def machine_info() -> dict[str, Any]:
 
 
 def _sync_dt(cfg: Config, d: object) -> float:
-    dt = cfg.numerics.cfl_safety * d.h / (cfg.air.c * SQRT3)
+    dt = cfl_for_legacy_derive(cfg.numerics) * d.h / (cfg.air.c * SQRT3)
     d.dt = dt
     return dt
 

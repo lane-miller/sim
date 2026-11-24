@@ -35,6 +35,7 @@ from boxrad.config import (  # noqa: E402
     Output,
     Radiator,
     SQRT3,
+    cfl_for_legacy_derive,
     derive,
     estimate_memory_bytes,
 )
@@ -136,7 +137,7 @@ def _emit_sim_progress(
 
 
 def _sync_dt(cfg: Config, d: object) -> float:
-    dt = cfg.numerics.cfl_safety * d.h / (cfg.air.c * SQRT3)
+    dt = cfl_for_legacy_derive(cfg.numerics) * d.h / (cfg.air.c * SQRT3)
     d.dt = dt
     return dt
 
@@ -1732,7 +1733,7 @@ def _c02_body(args: argparse.Namespace) -> int:
     projection_rows, projection_meta = application_projection(
         c=cfg.air.c,
         f_max=d.f_max,
-        cfl=cfg.numerics.cfl_safety,
+        cfl=cfl_for_legacy_derive(cfg.numerics),
         box_mm=box_mm,
         analysis=analysis,
     )

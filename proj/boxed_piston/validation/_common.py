@@ -19,7 +19,13 @@ import numpy as np
 
 _RunKey = TypeVar("_RunKey")
 
-from boxrad.config import DEFAULT_RAM_LIMIT_BYTES, Config, SQRT3, estimate_memory_bytes
+from boxrad.config import (
+    DEFAULT_RAM_LIMIT_BYTES,
+    Config,
+    SQRT3,
+    cfl_for_legacy_derive,
+    estimate_memory_bytes,
+)
 from boxrad.grid import Grid
 from boxrad.post.transfer import (
     h_transfer_err,
@@ -237,7 +243,7 @@ def emit_sim_progress(line: str, *, tty: bool, final: bool) -> None:
 
 
 def sync_dt(cfg: Config, d: object, cfl: float | None = None) -> float:
-    cfl_safety = cfg.numerics.cfl_safety if cfl is None else cfl
+    cfl_safety = cfl_for_legacy_derive(cfg.numerics) if cfl is None else cfl
     dt = cfl_safety * d.h / (cfg.air.c * SQRT3)
     d.dt = dt
     return dt
