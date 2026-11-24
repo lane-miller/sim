@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sys
@@ -20,7 +21,7 @@ _SHOWCASE = _PKG / "configs" / "showcase"
 sys.path.insert(0, str(_PKG))
 
 from boxrad import Result  # noqa: E402
-from boxrad.config import Config  # noqa: E402
+from boxrad.config import DEFAULT_GAP_CELLS, Config  # noqa: E402
 from boxrad.geomrun import dry_run_geom  # noqa: E402
 from boxrad.runner import keep_awake, run  # noqa: E402
 from validation._common import to_json_safe  # noqa: E402
@@ -40,10 +41,23 @@ def _load_json(path: Path) -> Config:
     return Config.from_json(path.read_text(encoding="utf-8"))
 
 
-def _h_cfg(base: Config, h: float) -> Config:
+def _h_cfg(base: Config, h: float, *, gap_cells: int | None = None) -> Config:
     raw = json.loads(base.to_json())
     raw["numerics"]["h_override"] = h
+    if gap_cells is not None:
+        raw["numerics"]["gap_cells"] = gap_cells
     return Config.from_dict(raw)
+
+
+def _run_meta(cfg: Config) -> dict[str, float | int]:
+    est = dry_run_geom(cfg)
+    gap_cells = cfg.numerics.gap_cells if cfg.numerics.gap_cells is not None else DEFAULT_GAP_CELLS
+    h_m = float(est["h"])
+    return {
+        "gap_cells": gap_cells,
+        "gap_m": gap_cells * h_m,
+        "record_length_s": float(est["n_steps"]) * float(est["dt"]),
+    }
 
 
 def _ensure_run(name: str, cfg: Config, out: Path) -> Path:
@@ -126,31 +140,68 @@ def _run_level(
     cfg_base: Config,
     h: float,
     idx: int,
+    *,
+    fixed_gap_m: float | None,
 ) -> dict[str, Any]:
-    cfg = _h_cfg(cfg_base, h)
-    out = _OUT / f"{base_name}_h{idx}.h5"
+    gap_cells: int | None = None
+    if fixed_gap_m is not None:
+        gap_cells = round(fixed_gap_m / h)
+    cfg = _h_cfg(cfg_base, h, gap_cells=gap_cells)
+    meta = _run_meta(cfg)
+    reuse_default_h1 = (
+        fixed_gap_m is not None
+        and idx == 1
+        and meta["gap_cells"] == DEFAULT_GAP_CELLS
+    )
+    suffix = ""
+    if fixed_gap_m is not None and not reuse_default_h1:
+        suffix = "_g"
+    out = _OUT / f"{base_name}_h{idx}{suffix}.h5"
     _ensure_run(f"{label} h{idx}", cfg, out)
-    return {"h5": out, "h_m": h, "cfg": cfg}
+    return {"h5": out, "h_m": h, "cfg": cfg, "meta": meta, "reused_h1_default": reuse_default_h1}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--fixed-gap-m",
+        type=float,
+        default=None,
+        metavar="X",
+        help="Fix physical air gap (m): set numerics.gap_cells=round(X/h) per level",
+    )
+    args = parser.parse_args(argv)
+    fixed_gap_m = args.fixed_gap_m
+
     t0 = time.perf_counter()
     _OUT.mkdir(parents=True, exist_ok=True)
+    stem = "c18_fixedgap" if fixed_gap_m is not None else "c18"
     cfg_s3p = _load_json(_SHOWCASE / "s3p_c09_parametric.json")
     cfg_s4 = _load_json(_SHOWCASE / "s4_tilted.json")
 
     print("C18(i) dry-run summary (all six levels):")
     for i, h in enumerate(_H_LEVELS, start=1):
         for nm, cfg in (("s3p", cfg_s3p), ("s4", cfg_s4)):
-            est = dry_run_geom(_h_cfg(cfg, h))
+            gap_cells = round(fixed_gap_m / h) if fixed_gap_m is not None else None
+            est = dry_run_geom(_h_cfg(cfg, h, gap_cells=gap_cells))
             ncell = int(np.prod(est["grid_shape"]))
             print(
                 f"  {nm} h{i}: cells={ncell}  h={h * 1e3:.4g} mm  "
                 f"n_steps={est['n_steps']}  wall_est={est['wall_time_s_est']:.3g} s"
             )
 
-    s3p_runs = [_run_level("s3p", "s3p", cfg_s3p, h, i) for i, h in enumerate(_H_LEVELS, 1)]
-    s4_runs = [_run_level("S4", "s4", cfg_s4, h, i) for i, h in enumerate(_H_LEVELS, 1)]
+    s3p_runs = [
+        _run_level("s3p", "s3p", cfg_s3p, h, i, fixed_gap_m=fixed_gap_m)
+        for i, h in enumerate(_H_LEVELS, 1)
+    ]
+    s4_runs = [
+        _run_level("S4", "s4", cfg_s4, h, i, fixed_gap_m=fixed_gap_m)
+        for i, h in enumerate(_H_LEVELS, 1)
+    ]
+    if fixed_gap_m is not None:
+        reused = [str(r["h5"]) for r in (*s3p_runs, *s4_runs) if r.get("reused_h1_default")]
+        if reused:
+            print("fixed-gap: reused default h1 HDF5:", ", ".join(reused))
 
     metrics: dict[str, Any] = {"h_m": list(_H_LEVELS)}
     per_level: list[dict[str, Any]] = []
@@ -166,6 +217,8 @@ def main() -> int:
         row["farfield_on_axis_db"] = ff
         row["directivity_max_db"] = di
         row.pop("freqs_hz", None)
+        row["s3p"] = s3p_runs[i]["meta"]
+        row["s4"] = s4_runs[i]["meta"]
         per_level.append(row)
 
     orders: dict[str, list[float]] = {
@@ -246,7 +299,7 @@ def main() -> int:
     ax.set_title("Re/Im z at three h (solid=Re color, paired Im)")
 
     fig.tight_layout()
-    fig.savefig(_OUT / "c18.png", dpi=140)
+    fig.savefig(_OUT / f"{stem}.png", dpi=140)
 
     z_curves = {}
     for i, runs in enumerate((s3p_runs, s4_runs)):
@@ -256,7 +309,13 @@ def main() -> int:
             with Result(run["h5"]) as res:
                 f, z = res.z()
                 z_curves[tag].append(
-                    {"h_m": run["h_m"], "freqs_hz": f.tolist(), "z_real": z.real.tolist(), "z_imag": z.imag.tolist()}
+                    {
+                        "h_m": run["h_m"],
+                        "freqs_hz": f.tolist(),
+                        "z_real": z.real.tolist(),
+                        "z_imag": z.imag.tolist(),
+                        **run["meta"],
+                    }
                 )
 
     payload = to_json_safe(
@@ -273,8 +332,9 @@ def main() -> int:
             "elapsed_s": time.perf_counter() - t0,
         }
     )
-    (_OUT / "c18.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"\nwrote {_OUT / 'c18.json'} and c18.png  ({payload['elapsed_s']:.1f} s)")
+    json_path = _OUT / f"{stem}.json"
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"\nwrote {json_path} and {stem}.png  ({payload['elapsed_s']:.1f} s)")
     print(
         f"C18 gate (finest h): Re z={fine['ez_re']:.4g}  Im z={fine['ez_im']:.4g}  "
         f"FF={fine['farfield_on_axis_db']:.4g} dB  pass={gate['pass']}"
