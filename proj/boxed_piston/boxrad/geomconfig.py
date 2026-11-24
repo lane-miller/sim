@@ -337,6 +337,7 @@ def parse_geometry(cfg_dict: dict[str, Any]) -> GeometrySpec:
     tag = _geometry_tag(cfg_dict)
     radiator_dict = cfg_dict.get("radiator")
     if tag == "baffle":
+        _reject_test_source(cfg_dict, "baffle")
         if radiator_dict is None:
             raise ValueError("baffle geometry requires radiator section")
         _baffle_forbids_extras(cfg_dict)
@@ -349,6 +350,7 @@ def parse_geometry(cfg_dict: dict[str, Any]) -> GeometrySpec:
         )
 
     if tag == "box":
+        _reject_test_source(cfg_dict, "box")
         if radiator_dict is None:
             raise ValueError("box geometry requires radiator section")
         environment = _parse_environment(cfg_dict)
@@ -363,12 +365,19 @@ def parse_geometry(cfg_dict: dict[str, Any]) -> GeometrySpec:
         return GeometrySpec(tag="box", parts=(), radiators=tuple(radiators), environment=environment)
 
     parts_in = cfg_dict.get("parts")
-    if not isinstance(parts_in, list):
-        raise ValueError(f'{tag} geometry requires non-empty "parts" list')
+    if parts_in is None:
+        parts_in = []
+    elif not isinstance(parts_in, list):
+        raise ValueError(f'{tag} geometry requires a "parts" list')
 
     environment = _parse_environment(cfg_dict)
 
     if tag == "parametric":
+        num = cfg_dict.get("numerics") or {}
+        ts_raw = num.get("test_source") if isinstance(num, dict) else None
+        has_test_source = ts_raw is not None
+        if has_test_source and tag != "parametric":
+            raise ValueError("numerics.test_source is allowed only with geometry='parametric'")
         parts: list[PrimitiveSpec | StepPartSpec] = []
         for i, entry in enumerate(parts_in):
             if "step" in entry:
@@ -376,10 +385,14 @@ def parse_geometry(cfg_dict: dict[str, Any]) -> GeometrySpec:
                     "mixing STEP and parametric parts is not supported in v0.3"
                 )
             parts.append(_parse_primitive(entry, ctx=f"parts[{i}]"))
-        if not parts:
+        if not parts and not has_test_source:
             raise ValueError("parametric geometry requires at least one part")
         rad_in = cfg_dict.get("radiators")
-        if not isinstance(rad_in, list) or not rad_in:
+        if rad_in is None:
+            rad_in = []
+        elif not isinstance(rad_in, list):
+            raise ValueError("radiators must be a list for parametric geometry")
+        if not rad_in and not has_test_source:
             raise ValueError("parametric geometry requires non-empty radiators")
         radiators_p: list[RadiatorSpec] = []
         for i, entry in enumerate(rad_in):
@@ -420,6 +433,12 @@ def parse_geometry(cfg_dict: dict[str, Any]) -> GeometrySpec:
         )
 
     raise ValueError(f"unsupported geometry tag {tag!r}")
+
+
+def _reject_test_source(cfg_dict: dict[str, Any], tag: str) -> None:
+    num = cfg_dict.get("numerics") or {}
+    if isinstance(num, dict) and num.get("test_source") is not None:
+        raise ValueError(f"numerics.test_source is not supported with geometry={tag!r}")
 
 
 def _check_unique_radiator_names(radiators: list[RadiatorSpec]) -> None:

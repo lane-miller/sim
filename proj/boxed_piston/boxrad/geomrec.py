@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from boxrad.config import Config, Derived
+from boxrad.config import Config, Derived, test_source_active
 from boxrad.geom.geometry import Geometry
 from boxrad.geomderive import GeomGrid
 from boxrad.grid import Fields
@@ -365,11 +365,18 @@ class GeomRecorder:
         self.t0 = float(derived.pulse_t0)
         self.decim = resolve_decimation_factor(cfg, derived)
         self._offset = offset
-        self._zrad_source = "fdtd"
         n_rad = len(geometry.radiators)
-        if not (0 <= driven < n_rad):
-            raise ValueError(f"driven index {driven} out of range for {n_rad} radiators")
-        self._driven = int(driven)
+        self._test_source_only = bool(test_source_active(cfg) and n_rad == 0)
+        if n_rad == 0:
+            if not self._test_source_only:
+                raise ValueError("GeomRecorder requires at least one radiator")
+            self._driven = 0
+            self._zrad_source = "test_source"
+        else:
+            if not (0 <= driven < n_rad):
+                raise ValueError(f"driven index {driven} out of range for {n_rad} radiators")
+            self._driven = int(driven)
+            self._zrad_source = "fdtd"
         self._n_radiators = n_rad
         self._rad_names = [r.name for r in geometry.radiators]
 
@@ -432,11 +439,12 @@ class GeomRecorder:
                 xc = _cell_center(gg, int(flat))
                 d_c_i[q] = float(np.dot(xc - centroids_i[q], n_hat_i))
             self._all_d.append(d_c_i)
-        self._n_hat = self._all_n_hat[driven]
-        self._rad_p_idx = self._all_p_idx[driven]
-        self._rad_w = self._all_w[driven]
-        self._rad_w_sum = self._all_w_sum[driven]
-        self._rad_d = self._all_d[driven]
+        if not self._test_source_only:
+            self._n_hat = self._all_n_hat[driven]
+            self._rad_p_idx = self._all_p_idx[driven]
+            self._rad_w = self._all_w[driven]
+            self._rad_w_sum = self._all_w_sum[driven]
+            self._rad_d = self._all_d[driven]
 
         probe_targets = self._resolve_probe_targets(cfg)
         self._n_probes = len(probe_targets)
@@ -530,18 +538,30 @@ class GeomRecorder:
         return idx, centers
 
     def _write_static_meta(self, huygens_patches) -> None:
-        rd_drv = self.geometry.radiators[self._driven]
-        pose = rd_drv.pose
         meta = self._file.create_group("meta")
         meta.attrs["schema_version"] = 2
         meta.attrs["n_radiators"] = int(self._n_radiators)
         meta.attrs["radiator_names_json"] = json.dumps(self._rad_names)
         meta.attrs["radiator_S_json"] = json.dumps(self._rad_S)
         meta.attrs["driven_index"] = int(self._driven)
-        meta.attrs["driven_name"] = str(self._rad_names[self._driven])
+        if self._rad_names:
+            meta.attrs["driven_name"] = str(self._rad_names[self._driven])
+        else:
+            meta.attrs["driven_name"] = "test_source"
         meta.attrs["mutual_status"] = "recorded_unvalidated"
         meta.attrs["conventions"] = _CONVENTIONS
         meta.attrs["zrad_source"] = self._zrad_source
+        if test_source_active(self.cfg):
+            meta.attrs["drive_kind"] = "test_source"
+            meta.attrs["transfer_units"] = "Pa/(m^3/s)"
+            ts = self.cfg.numerics.test_source
+            assert ts is not None
+            blob = {
+                "position": list(ts.position),
+                "cell_center": list(self.derived.test_source_cell_center or (0.0, 0.0, 0.0)),
+                "index": list(self.derived.test_source_cell_index or (0, 0, 0)),
+            }
+            meta.attrs["test_source_json"] = json.dumps(blob)
         meta.attrs["decimation_factor"] = self.decim
         meta.attrs["decimation_note"] = (
             "Huygens decimation m from alias rejection vs analytic pulse spectrum (see derived_json)"
@@ -550,11 +570,13 @@ class GeomRecorder:
         meta.attrs["dt"] = self.dt
         meta.attrs["huygens_offset_cells"] = self._offset
         meta.attrs["geometry"] = "parametric"
-        meta.attrs["S_grid"] = float(self.op_info["S_grid"])
+        meta.attrs["S_grid"] = float(self.op_info["S_grid"]) if not self._test_source_only else 1.0
         meta.attrs["frame"] = "world"
-        meta.attrs["radiator0_position"] = pose.position.astype(_F64)
-        meta.attrs["radiator0_normal"] = pose.R[:, 2].astype(_F64)
-        meta.attrs["radiator0_x_axis"] = pose.R[:, 0].astype(_F64)
+        if self.geometry.radiators:
+            pose = self.geometry.radiators[self._driven].pose
+            meta.attrs["radiator0_position"] = pose.position.astype(_F64)
+            meta.attrs["radiator0_normal"] = pose.R[:, 2].astype(_F64)
+            meta.attrs["radiator0_x_axis"] = pose.R[:, 0].astype(_F64)
         meta.attrs["kernel_path"] = str(self.op_info["path"])
         meta.attrs["geom_stats_json"] = _geom_stats_json(self.op_info)
         planes = list(self.gg.planes) if self.gg.planes else []
@@ -570,16 +592,17 @@ class GeomRecorder:
         derived_blob = json.dumps(asdict(self.derived))
         meta.create_dataset("derived_json", data=np.asarray(derived_blob, dtype="S"))
 
-        rad = self._file.create_group("radiator")
-        rad.attrs["description"] = "Unit pulse v(t); area-weighted radiator face pressure p_avg"
-        rad.attrs["p_avg_all_note"] = (
-            "columns in config radiator order; velocity correction on driven column only"
-        )
-        rad.attrs["times_p_note"] = "t_p = (n+1)·Δt after step(n) (p^{n+1} on grid)"
-        rad.attrs["times_v_half_note"] = "t_v = (n+½)·Δt after step(n) (v^{n+½} on grid)"
-        rad.attrs["v_pulse_integer_note"] = (
-            "velocity_pulse(t_p); same pressure time level as p_avg (audit: not drive time)"
-        )
+        if not self._test_source_only:
+            rad = self._file.create_group("radiator")
+            rad.attrs["description"] = "Unit pulse v(t); area-weighted radiator face pressure p_avg"
+            rad.attrs["p_avg_all_note"] = (
+                "columns in config radiator order; velocity correction on driven column only"
+            )
+            rad.attrs["times_p_note"] = "t_p = (n+1)·Δt after step(n) (p^{n+1} on grid)"
+            rad.attrs["times_v_half_note"] = "t_v = (n+½)·Δt after step(n) (v^{n+½} on grid)"
+            rad.attrs["v_pulse_integer_note"] = (
+                "velocity_pulse(t_p); same pressure time level as p_avg (audit: not drive time)"
+            )
 
         huy = self._file.create_group("huygens")
         for name, arr in (
@@ -625,16 +648,28 @@ class GeomRecorder:
         )
 
     def _init_datasets(self) -> None:
-        rad = self._file["radiator"]
         buf = self._buf_samples
-        self._ds_v_int = self._create_extensible(rad, "v_pulse_integer", (), _F64, buf)
-        self._ds_v_half = self._create_extensible(rad, "v_pulse_half", (), _F64, buf)
-        self._ds_p_avg = self._create_extensible(rad, "p_avg", (), _F64, buf)
-        self._ds_p_avg_all = self._create_extensible(
-            rad, "p_avg_all", (self._n_radiators,), _F64, buf
-        )
-        self._ds_rad_tp = self._create_extensible(rad, "times_p", (), _F64, buf)
-        self._ds_rad_tv = self._create_extensible(rad, "times_v_half", (), _F64, buf)
+        if self._test_source_only:
+            self._ds_v_int = self._ds_v_half = self._ds_p_avg = None  # type: ignore[assignment]
+            self._ds_p_avg_all = self._ds_rad_tp = self._ds_rad_tv = None  # type: ignore[assignment]
+            self._w_v_int = self._w_v_half = self._w_p_avg = None  # type: ignore[assignment]
+            self._w_p_avg_all = self._w_rad_tp = self._w_rad_tv = None  # type: ignore[assignment]
+        else:
+            rad = self._file["radiator"]
+            self._ds_v_int = self._create_extensible(rad, "v_pulse_integer", (), _F64, buf)
+            self._ds_v_half = self._create_extensible(rad, "v_pulse_half", (), _F64, buf)
+            self._ds_p_avg = self._create_extensible(rad, "p_avg", (), _F64, buf)
+            self._ds_p_avg_all = self._create_extensible(
+                rad, "p_avg_all", (self._n_radiators,), _F64, buf
+            )
+            self._ds_rad_tp = self._create_extensible(rad, "times_p", (), _F64, buf)
+            self._ds_rad_tv = self._create_extensible(rad, "times_v_half", (), _F64, buf)
+            self._w_v_int = _ChunkWriter(self._ds_v_int, buf)
+            self._w_v_half = _ChunkWriter(self._ds_v_half, buf)
+            self._w_p_avg = _ChunkWriter(self._ds_p_avg, buf)
+            self._w_p_avg_all = _ChunkWriter(self._ds_p_avg_all, buf)
+            self._w_rad_tp = _ChunkWriter(self._ds_rad_tp, buf)
+            self._w_rad_tv = _ChunkWriter(self._ds_rad_tv, buf)
 
         huy = self._file["huygens"]
         nh = self._n_huy
@@ -652,12 +687,6 @@ class GeomRecorder:
             self._ds_pr_p = None
             self._ds_pr_tp = None
 
-        self._w_v_int = _ChunkWriter(self._ds_v_int, buf)
-        self._w_v_half = _ChunkWriter(self._ds_v_half, buf)
-        self._w_p_avg = _ChunkWriter(self._ds_p_avg, buf)
-        self._w_p_avg_all = _ChunkWriter(self._ds_p_avg_all, buf)
-        self._w_rad_tp = _ChunkWriter(self._ds_rad_tp, buf)
-        self._w_rad_tv = _ChunkWriter(self._ds_rad_tv, buf)
         self._w_h_p = _ChunkWriter(self._ds_h_p, buf)
         self._w_h_vn = _ChunkWriter(self._ds_h_vn, buf)
         self._w_h_tp = _ChunkWriter(self._ds_h_tp, buf)
@@ -724,12 +753,13 @@ class GeomRecorder:
         v_half = velocity_at_half_step(n, self.dt, self.sigma, self.t0)
         p_flat = fields.p.reshape(-1)
 
-        self._w_v_int.append(v_at_p)
-        self._w_v_half.append(float(v_half))
-        self._w_p_avg.append(self._radiator_p_avg(p_flat, n))
-        self._w_p_avg_all.append(self._radiator_p_avg_all(p_flat, n))
-        self._w_rad_tp.append(t_p)
-        self._w_rad_tv.append(t_v)
+        if not self._test_source_only:
+            self._w_v_int.append(v_at_p)  # type: ignore[union-attr]
+            self._w_v_half.append(float(v_half))  # type: ignore[union-attr]
+            self._w_p_avg.append(self._radiator_p_avg(p_flat, n))  # type: ignore[union-attr]
+            self._w_p_avg_all.append(self._radiator_p_avg_all(p_flat, n))  # type: ignore[union-attr]
+            self._w_rad_tp.append(t_p)  # type: ignore[union-attr]
+            self._w_rad_tv.append(t_v)  # type: ignore[union-attr]
 
         if n % self.decim == 0:
             self._w_h_p.append(self._huygens_p(p_flat).astype(_F32))
@@ -746,25 +776,26 @@ class GeomRecorder:
         if self._closed:
             return
         h5 = _require_h5py()
-        for w in (
-            self._w_v_int,
-            self._w_v_half,
-            self._w_p_avg,
-            self._w_p_avg_all,
-            self._w_rad_tp,
-            self._w_rad_tv,
+        writers = [
             self._w_h_p,
             self._w_h_vn,
             self._w_h_tp,
             self._w_h_tvn,
-            *(
-                w
-                for w in (self._w_pr_p, self._w_pr_tp)
-                if w is not None
-            ),
-        ):
-            w.close()
-        p_avg_full: np.ndarray
+            *(w for w in (self._w_pr_p, self._w_pr_tp) if w is not None),
+        ]
+        if not self._test_source_only:
+            writers = [
+                self._w_v_int,
+                self._w_v_half,
+                self._w_p_avg,
+                self._w_p_avg_all,
+                self._w_rad_tp,
+                self._w_rad_tv,
+                *writers,
+            ]
+        for w in writers:
+            if w is not None:
+                w.close()
         if self._file is not None:
             n_full = self._step
             n_dec = (n_full + self.decim - 1) // self.decim if n_full else 0
@@ -779,19 +810,21 @@ class GeomRecorder:
                 times_dec_p = times_dec_v = np.empty(0, _F64)
             meta.create_dataset("sample_times_decimated_p", data=times_dec_p, compression="gzip")
             meta.create_dataset("sample_times_decimated_v", data=times_dec_v, compression="gzip")
-            p_avg_full = np.asarray(self._ds_p_avg[()], dtype=_F64)
             self._file.flush()
             self._file.close()
             self._file = None  # type: ignore[assignment]
-        else:
-            with h5.File(self._path, "r") as f_read:
-                p_avg_full = np.asarray(f_read["radiator/p_avg"][()], dtype=_F64)
 
-        p_avg_all_full: np.ndarray
+        if self._test_source_only:
+            with h5.File(self._path, "a") as f_append:
+                f_append["meta"].attrs["conventions"] = _WORLD_CONVENTIONS
+            self._tail_db = float("nan")
+            self._closed = True
+            return
+
+        p_avg_full: np.ndarray
         with h5.File(self._path, "r") as f_read:
-            p_avg_all_full = np.asarray(
-                f_read["radiator/p_avg_all"][()], dtype=_F64
-            )
+            p_avg_full = np.asarray(f_read["radiator/p_avg"][()], dtype=_F64)
+            p_avg_all_full = np.asarray(f_read["radiator/p_avg_all"][()], dtype=_F64)
             times_p = np.asarray(f_read["radiator/times_p"][()], dtype=_F64)
             derived_blob = json.loads(
                 bytes(f_read["meta/derived_json"][()]).decode("utf-8")

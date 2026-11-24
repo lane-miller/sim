@@ -202,8 +202,22 @@ class Result:
             raise ValueError("radiator0 pose has non-positive determinant (not a rotation)")
         return r_mat.astype(_F64, copy=False), t.astype(_F64, copy=False)
 
+    @cached_property
+    def test_source(self) -> dict[str, Any] | None:
+        """Validation monopole metadata from ``meta.test_source_json``, or ``None``."""
+        raw = self.meta.get("test_source_json")
+        if raw is None or raw == "":
+            return None
+        if isinstance(raw, str):
+            return json.loads(raw)
+        if isinstance(raw, dict):
+            return dict(raw)
+        return None
+
     def _resolve_frame(self, frame: Literal["local", "world"] | None) -> Literal["local", "world"]:
         if frame is None:
+            if int(self.meta.get("n_radiators", 1)) == 0 or self.meta.get("drive_kind") == "test_source":
+                return "world"
             return self.frame_default
         if frame not in ("local", "world"):
             raise ValueError(f"frame must be 'local' or 'world', got {frame!r}")
@@ -583,10 +597,15 @@ class Result:
             Exact discrete spectra at each ``f`` (no interpolation).
         """
         if f is None:
-            dset = self._file()["results/zrad"]
+            f_file = self._file()
+            if "results" not in f_file or "zrad" not in f_file["results"]:
+                raise ValueError("test-source run: no radiator impedance")
+            dset = f_file["results/zrad"]
             f_arr = np.atleast_1d(np.asarray(dset.attrs["f"], dtype=_F64))
             z_arr = np.atleast_1d(np.asarray(dset[()], dtype=_C128))
             return f_arr, z_arr
+        if int(self.meta.get("n_radiators", 1)) == 0:
+            raise ValueError("test-source run: no radiator impedance")
         return self._z_at(self._check_f(f, allow_out_of_band))
 
     def Z_acoustic(self, f: np.ndarray | float, *, allow_out_of_band: bool = False) -> np.ndarray:
@@ -602,6 +621,8 @@ class Result:
         Raises:
             ValueError: Out-of-band ``f`` without ``allow_out_of_band``.
         """
+        if int(self.meta.get("n_radiators", 1)) == 0:
+            raise ValueError("test-source run: no radiator impedance")
         _, z = self._z_at(self._check_f(f, allow_out_of_band))
         rho = float(self.config.air.rho)
         c = float(self.config.air.c)
@@ -621,6 +642,8 @@ class Result:
         Raises:
             ValueError: Out-of-band ``f`` without ``allow_out_of_band``.
         """
+        if int(self.meta.get("n_radiators", 1)) == 0:
+            raise ValueError("test-source run: no radiator impedance")
         _, z = self._z_at(self._check_f(f, allow_out_of_band))
         rho = float(self.config.air.rho)
         c = float(self.config.air.c)

@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from boxrad.config import Config, Derived
+from boxrad.config import Config, Derived, test_source_active
 from boxrad.cutcell import Fractions, compute_fractions
 from boxrad.cutkernel import CutOperator, FastRadiator, PatchRadiator, build_operator
 from boxrad.grid import CpmlSlabs
@@ -235,6 +235,33 @@ def _assert_geometry_clear_of_cpml_sides(
         _check_face(op.afl_z, nz - c, nz + 1, 2)
 
 
+def assert_test_source_cell_fluid(
+    fractions: Fractions,
+    index: tuple[int, int, int],
+) -> None:
+    i, j, k = index
+    b = float(fractions.beta[i, j, k])
+    if b < 1.0 - 1e-9:
+        raise ValueError(
+            f"test_source cell ({i},{j},{k}) has beta={b:g}; must be full fluid (beta=1)"
+        )
+    ax, ay, az = fractions.alpha
+    face_vals = (
+        float(ax[i, j, k]),
+        float(ax[i + 1, j, k]),
+        float(ay[i, j, k]),
+        float(ay[i, j + 1, k]),
+        float(az[i, j, k]),
+        float(az[i, j, k + 1]),
+    )
+    for q, a in enumerate(face_vals):
+        if a < 1.0 - 1e-9:
+            raise ValueError(
+                f"test_source cell ({i},{j},{k}) face {q} has alpha={a:g}; "
+                "must be full fluid"
+            )
+
+
 def build_run_operator(
     cfg: Config,
     derived: Derived,
@@ -246,7 +273,11 @@ def build_run_operator(
 ) -> tuple[CutOperator, dict[str, Any]]:
     """Fractions → floor → cut operator; radiator ``driven`` driven, others rigid."""
     n_rad = len(geometry.radiators)
-    if not (0 <= driven < n_rad):
+    src_mode = test_source_active(cfg)
+    if n_rad == 0:
+        if not src_mode:
+            raise ValueError("parametric run requires at least one radiator")
+    elif not (0 <= driven < n_rad):
         raise ValueError(f"driven index {driven} out of range for {n_rad} radiators")
     if cache is None:
         cache = build_geom_op_cache(cfg, derived, gg, geometry)
@@ -255,9 +286,12 @@ def build_run_operator(
     thin_stats = cache.thin_stats
     floor_stats = cache.floor_stats
 
-    path, fast, patch, s_grid = _build_radiator(
-        driven, fractions, derived.h, gg.nx, gg.ny, gg.nz, geometry
-    )
+    if src_mode:
+        path, fast, patch, s_grid = "test_source", [], [], 0.0
+    else:
+        path, fast, patch, s_grid = _build_radiator(
+            driven, fractions, derived.h, gg.nx, gg.ny, gg.nz, geometry
+        )
     op = build_operator(fractions, beta_tilde.astype(_F32), fast, patch, derived.h)
     _assert_geometry_clear_of_cpml_sides(op, gg.cpml_slabs, derived.cpml_sides)
 

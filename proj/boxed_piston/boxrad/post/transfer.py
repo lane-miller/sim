@@ -122,7 +122,10 @@ def load_huygens_spectra(
         t_v = np.asarray(f["huygens/times_vn"][()], dtype=_F64)
         p_ts = np.asarray(f["huygens/p_face"][()], dtype=_F64)
         vn_ts = np.asarray(f["huygens/vn"][()], dtype=_F64)
-        t_rad = np.asarray(f["radiator/times_p"][()], dtype=_F64)
+        if "radiator" in f:
+            t_rad = np.asarray(f["radiator/times_p"][()], dtype=_F64)
+        else:
+            t_rad = np.asarray(f["huygens/times_p"][()], dtype=_F64)
         v_rad = np.array(
             [
                 velocity_pulse(float(t), derived.pulse_sigma, derived.pulse_t0)  # type: ignore[attr-defined]

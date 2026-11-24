@@ -10,12 +10,17 @@ from typing import Any
 
 import numpy as np
 
-from boxrad.config import Config, Derived, estimate_memory_bytes
+from boxrad.config import Config, Derived, estimate_memory_bytes, test_source_active
 from boxrad.cpml import make_cpml_state
 from boxrad.cutkernel import CutOperator, step_cut
 from boxrad.geom.geometry import Geometry, build_geometry, radiator_clearance
 from boxrad.geomderive import GeomGrid, derive_geom, validate_geom
-from boxrad.geomop import GeomOpCache, build_geom_op_cache, build_run_operator
+from boxrad.geomop import (
+    GeomOpCache,
+    assert_test_source_cell_fluid,
+    build_geom_op_cache,
+    build_run_operator,
+)
 from boxrad.grid import Fields, allocate_fields
 from boxrad.kernels import UpdateCoeffs, make_update_coeffs
 from boxrad.runner import (
@@ -46,6 +51,7 @@ class GeomRun:
     t0: float
     dt: float
     warnings: list[str]
+    test_source: tuple[int, np.float32, np.float32] | None = None
 
 
 def _stability_failed(p: np.ndarray, p_max: float) -> bool:
@@ -59,8 +65,28 @@ def _print_warnings(warnings: list[str]) -> None:
         print(f"warning: {msg}", file=sys.stderr)
 
 
+def _test_source_injection(
+    cfg: Config,
+    derived: Derived,
+    coeffs: UpdateCoeffs,
+    fractions,
+) -> tuple[int, np.float32, np.float32] | None:
+    if not test_source_active(cfg):
+        return None
+    idx = derived.test_source_cell_index
+    if idx is None:
+        raise ValueError("derived.test_source_cell_index missing for numerics.test_source run")
+    assert_test_source_cell_fluid(fractions, idx)
+    h = float(derived.h)
+    flat = int(np.ravel_multi_index(idx, (derived.nx, derived.ny, derived.nz)))
+    coeff = _F32(float(coeffs.cp) / (h * h))
+    return flat, coeff, _F32(0.0)
+
+
 def resolve_drive_indices(cfg: Config) -> list[int]:
     """Radiator indices to drive, in config order; radiator 0 is always included."""
+    if test_source_active(cfg):
+        return [0]
     spec = cfg.geometry_spec
     if spec is None or not spec.radiators:
         return [0]
@@ -104,6 +130,7 @@ def prepare_geom_run(
     op, info = build_run_operator(
         cfg, derived, gg, geometry, driven=driven, cache=cache
     )
+    inj = _test_source_injection(cfg, derived, coeffs, info["fractions"])
     sigma = derived.pulse_sigma
     t0 = derived.pulse_t0
     return GeomRun(
@@ -120,6 +147,7 @@ def prepare_geom_run(
         t0=t0,
         dt=derived.dt,
         warnings=warnings,
+        test_source=(inj[0], inj[1], inj[2]) if inj is not None else None,
     )
 
 
@@ -127,8 +155,24 @@ def step_geom(run: GeomRun, n: int) -> None:
     v_now = _F32(
         velocity_at_half_step(n, float(run.dt), float(run.sigma), float(run.t0))
     )
-    v_list = [v_now]
-    step_cut(run.fields, run.coeffs, run.op, run.cpml, v_list)
+    nf = len(run.op.radiators_fast)
+    npatch = len(run.op.radiators_patch)
+    if test_source_active(run.cfg):
+        v_list: list[np.float32] = [_F32(0.0)] * (nf + npatch)
+    else:
+        v_list = [v_now]
+    test_src = None
+    if run.test_source is not None:
+        flat, coeff, _ = run.test_source
+        test_src = (flat, coeff, v_now)
+    step_cut(
+        run.fields,
+        run.coeffs,
+        run.op,
+        run.cpml,
+        v_list,
+        test_source=test_src,
+    )
 
 
 def simulate_geom(
@@ -200,13 +244,18 @@ def dry_run_geom(cfg: Config, *, out_path: Path | None = None) -> dict[str, Any]
     names = [r.name for r in geometry.radiators]
     n_rad = len(names)
     base = out_path or Path("out.h5")
-    run_files: list[str | None] = [None] * n_rad
+    run_files: list[str | None] = [None] * max(n_rad, 1)
     planned: list[str] = []
     for j in drive:
-        bn = multirad_output_basename(base, j, names[j])
+        bn = (
+            base.name
+            if test_source_active(cfg) or j == 0
+            else multirad_output_basename(base, j, names[j] if j < n_rad else "radiator")
+        )
         if bn is not None:
             planned.append(bn)
-        run_files[j] = bn
+        if j < len(run_files):
+            run_files[j] = bn
     return {
         "grid_shape": (derived.nx, derived.ny, derived.nz),
         "h": derived.h,

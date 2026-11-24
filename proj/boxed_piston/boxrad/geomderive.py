@@ -16,8 +16,10 @@ from boxrad.config import (
     Config,
     Derived,
     _memory_bytes,
+    _radiator_D,
     pulse_params,
     resolve_decimation,
+    test_source_active,
 )
 from boxrad.geom.geometry import Geometry
 from boxrad.cutcell import _side_key
@@ -190,7 +192,10 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
     gap_cells = DEFAULT_GAP_CELLS if num.gap_cells is None else num.gap_cells
     cpml_cells = num.cpml_cells
 
-    D_min = _radiator_D_min(spec)
+    if spec.radiators:
+        D_min = _radiator_D_min(spec)
+    else:
+        D_min = _radiator_D(cfg.radiator)
     f_ka10 = 10.0 * c / (math.pi * D_min)
     f_max = cfg.band.f_max if cfg.band.f_max is not None else min(F_MAX_CAP_HZ, f_ka10)
     lambda_min = c / f_max
@@ -201,15 +206,35 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
         h_nominal = min(lambda_min / num.ppw, D_min / num.cells_across_radiator)
 
     planes = spec.environment.planes
-    _plane_crossing_errors(geometry, planes)
+    if geometry.solid.faces.shape[0] > 0:
+        _plane_crossing_errors(geometry, planes)
 
-    xlo, ylo, zlo, xhi, yhi, zhi = geometry.solid.bbox
-    lo = np.array([xlo, ylo, zlo], dtype=_F64)
-    hi = np.array([xhi, yhi, zhi], dtype=_F64)
+    ts_pos: np.ndarray | None = None
+    if test_source_active(cfg):
+        assert cfg.numerics.test_source is not None
+        ts_pos = np.asarray(cfg.numerics.test_source.position, dtype=_F64).reshape(3)
+    if geometry.solid.faces.shape[0] == 0:
+        if ts_pos is None:
+            raise ValueError("empty solid requires numerics.test_source")
+        lo = ts_pos - h_nominal
+        hi = ts_pos + h_nominal
+    else:
+        xlo, ylo, zlo, xhi, yhi, zhi = geometry.solid.bbox
+        lo = np.array([xlo, ylo, zlo], dtype=_F64)
+        hi = np.array([xhi, yhi, zhi], dtype=_F64)
+        if ts_pos is not None:
+            lo = np.minimum(lo, ts_pos)
+            hi = np.maximum(hi, ts_pos)
 
-    n_hat = geometry.radiators[0].pose.R[:, 2]
-    n_hat = n_hat / np.linalg.norm(n_hat)
-    pos0 = geometry.radiators[0].pose.position.astype(_F64)
+    if geometry.radiators:
+        n_hat = geometry.radiators[0].pose.R[:, 2]
+        n_hat = n_hat / np.linalg.norm(n_hat)
+        pos0 = geometry.radiators[0].pose.position.astype(_F64)
+    elif ts_pos is not None:
+        pos0 = ts_pos.copy()
+        n_hat = np.array([0.0, 0.0, 1.0], dtype=_F64)
+    else:
+        raise ValueError("parametric derive requires a radiator or numerics.test_source")
 
     h = _shrink_h_isotropic(h_nominal, planes, n_hat, pos0, lo)
 
@@ -217,6 +242,14 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
     for a in range(3):
         anc = _anchors_axis(planes, n_hat, pos0, float(lo[a]), a)
         anchors[a] = anc[0]
+        if (
+            not geometry.radiators
+            and ts_pos is not None
+            and _plane_offset(planes, a, "-") is None
+            and _plane_offset(planes, a, "+") is None
+        ):
+            # test source at a cell center: faces at ts ± h/2
+            anchors[a] = float(ts_pos[a]) - 0.5 * h
 
     lo_s, hi_s = _snap_bbox(lo, hi, h, anchors)
 
@@ -347,6 +380,16 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
         h_nominal=h_nominal,
     )
 
+    test_center: tuple[float, float, float] | None = None
+    test_index: tuple[int, int, int] | None = None
+    if ts_pos is not None:
+        ii = int(math.floor((float(ts_pos[0]) - float(x0[0])) / h))
+        jj = int(math.floor((float(ts_pos[1]) - float(x0[1])) / h))
+        kk = int(math.floor((float(ts_pos[2]) - float(x0[2])) / h))
+        cc = x0 + (np.array([ii, jj, kk], dtype=_F64) + 0.5) * h
+        test_center = (float(cc[0]), float(cc[1]), float(cc[2]))
+        test_index = (ii, jj, kk)
+
     derived = Derived(
         f_max=f_max,
         lambda_min=lambda_min,
@@ -379,6 +422,8 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
         cell_budget_exceeded=cell_budget_exceeded,
         decimation_m=decimation_m,
         alias_level_db=alias_level_db,
+        test_source_cell_center=test_center,
+        test_source_cell_index=test_index,
     )
     return derived, gg
 

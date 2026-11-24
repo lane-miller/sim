@@ -1025,6 +1025,41 @@ def _natural_grid_for_box(geometry: Geometry, cfg, h: float) -> Grid:
 def compute_fractions(geometry: Geometry | None, grid: Grid) -> Fractions:
     if geometry is None:
         raise ValueError("baffle geometry is not supported for compute_fractions")
+    nx, ny, nz = grid.nx, grid.ny, grid.nz
+    if geometry.solid.faces.shape[0] == 0:
+        alpha_x = np.ones((nx + 1, ny, nz), dtype=_F64)
+        alpha_y = np.ones((nx, ny + 1, nz), dtype=_F64)
+        alpha_z = np.ones((nx, ny, nz + 1), dtype=_F64)
+        beta = np.ones((nx, ny, nz), dtype=_F64)
+        state = np.full((nx, ny, nz), _STATE_FLUID, dtype=np.uint8)
+        return Fractions(
+            alpha=(alpha_x, alpha_y, alpha_z),
+            beta=beta,
+            state=state,
+            patch_cell=np.zeros(0, dtype=_I64),
+            patch_A=np.zeros(0, dtype=_F64),
+            patch_centroid=np.zeros((0, 3), dtype=_F64),
+            patch_normal=np.zeros((0, 3), dtype=_F64),
+            radiator_cell=[np.zeros(0, dtype=_I64) for _ in geometry.radiators],
+            radiator_a=[np.zeros(0, dtype=_F64) for _ in geometry.radiators],
+            radiator_S=[0.0 for _ in geometry.radiators],
+            radiator_centroid=[np.zeros((0, 3), dtype=_F64) for _ in geometry.radiators],
+            stats={
+                "n_cut_cells": 0,
+                "n_cut_faces": 0,
+                "min_beta_positive": 1.0,
+                "fluid_volume": float(nx * ny * nz * grid.h**3),
+                "mesh_volume": 0.0,
+                "volume_rel_error": 0.0,
+                "volume_rel_error_raw": 0.0,
+                "max_line_closure_residual": 0.0,
+                "voids_removed_count": 0,
+                "voids_removed_volume": 0.0,
+                "radiator_S": [0.0 for _ in geometry.radiators],
+                "wall_time_s": 0.0,
+                "h_shrunk": grid.h if grid.h != grid.h_nominal else None,
+            },
+        )
     t0 = time.perf_counter()
     mesh = _snap_mesh(geometry.solid, grid)
     fn_dummies = mesh.face_normals  # unused; normals from triangle cross product in kernel

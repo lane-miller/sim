@@ -42,6 +42,10 @@ def _legacy_config_paths() -> list[Path]:
     for path in sorted(CONFIGS.rglob("*.json")):
         if "showcase" in path.parts:
             continue
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        geom = raw.get("geometry")
+        if geom in ("parametric", "step"):
+            continue
         paths.append(path)
     return paths
 

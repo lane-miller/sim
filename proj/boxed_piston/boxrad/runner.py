@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import math
 import os
 import shutil
 import signal
@@ -353,6 +354,7 @@ def run(
     config = _load_config(cfg)
 
     if config.geometry == "parametric":
+        from boxrad.config import test_source_active
         from boxrad.geomrun import (
             dry_run_geom,
             multirad_output_path,
@@ -408,16 +410,21 @@ def run(
         cache: GeomOpCache | None = None
         tail_db: float | None = None
 
+        src_only = test_source_active(config) and not names
         for k, j in enumerate(drive):
             run = prepare_geom_run(config, driven=j, cache=cache)
             if cache is None:
                 cache = run.info["op_cache"]
-            run_dest = multirad_output_path(dest, j, names[j])
+            if src_only:
+                run_dest = dest
+            else:
+                run_dest = multirad_output_path(dest, j, names[j])
             rec: GeomRecorder | None = None
             aborted_step: int | None = None
             t_wall_start = time.perf_counter()
             last_pct = -2
-            prefix = f"run {k + 1}/{k_total} ({names[j]}) "
+            rad_label = names[j] if j < len(names) else "test_source"
+            prefix = f"run {k + 1}/{k_total} ({rad_label}) "
             try:
                 rec = GeomRecorder(
                     config,
@@ -464,25 +471,31 @@ def run(
                         meta.attrs["git_commit"] = _git_commit_hash()
                     rec.close()
                     tail_db = rec._tail_db
-            if tail_db is not None and tail_db > -60.0:
+            if (
+                not src_only
+                and tail_db is not None
+                and not math.isnan(tail_db)
+                and tail_db > -60.0
+            ):
                 print(
-                    f"warning: {names[j]} p_avg tail {tail_db:.1f} dB re peak (> −60 dB); "
+                    f"warning: {rad_label} p_avg tail {tail_db:.1f} dB re peak (> −60 dB); "
                     "increase numerics.n_transits",
                     file=sys.stderr,
                 )
 
         import json
 
-        try:
-            import h5py
-        except ImportError as exc:
-            raise ImportError("h5py required to write run_files_json") from exc
+        if not src_only:
+            try:
+                import h5py
+            except ImportError as exc:
+                raise ImportError("h5py required to write run_files_json") from exc
 
-        run_files: list[str | None] = [None] * n_rad
-        for j in drive:
-            run_files[j] = multirad_output_path(dest, j, names[j]).name
-        with h5py.File(dest, "a") as f_out:
-            f_out["meta"].attrs["run_files_json"] = json.dumps(run_files)
+            run_files: list[str | None] = [None] * n_rad
+            for j in drive:
+                run_files[j] = multirad_output_path(dest, j, names[j]).name
+            with h5py.File(dest, "a") as f_out:
+                f_out["meta"].attrs["run_files_json"] = json.dumps(run_files)
 
         if plot:
             print(

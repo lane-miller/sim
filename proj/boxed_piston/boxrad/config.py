@@ -65,6 +65,13 @@ class Band:
     f_max: float | None = None
 
 
+@dataclass(frozen=True)
+class TestSource:
+    """Validation-only monopole source position (world frame, meters)."""
+
+    position: tuple[float, float, float]
+
+
 @dataclass
 class Numerics:
     """Discretization, absorber, pulse, and run-length controls (see :func:`derive`)."""
@@ -87,6 +94,34 @@ class Numerics:
     n_transits: float = 3.0
     min_edge_cells: int = 3
     drive_radiators: list[str] | None = None  # parametric: subset to drive; default all
+    test_source: TestSource | None = None  # validation-only; parametric free-field gate
+
+
+def _parse_test_source(raw: Any) -> TestSource | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("numerics.test_source must be a dict or null")
+    pos = raw.get("position")
+    if pos is None:
+        raise ValueError("numerics.test_source requires position [x, y, z]")
+    if not isinstance(pos, (list, tuple)) or len(pos) != 3:
+        raise ValueError("numerics.test_source.position must be a length-3 list")
+    xyz = tuple(float(x) for x in pos)
+    if not all(math.isfinite(x) for x in xyz):
+        raise ValueError("numerics.test_source.position must be finite")
+    return TestSource(position=xyz)
+
+
+def _numerics_from_dict(raw: dict[str, Any]) -> Numerics:
+    known = {f.name for f in fields(Numerics)}
+    blob = {k: v for k, v in raw.items() if k in known and k != "test_source"}
+    test = _parse_test_source(raw.get("test_source")) if "test_source" in raw else None
+    return Numerics(**blob, test_source=test)
+
+
+def test_source_active(cfg: "Config") -> bool:
+    return cfg.numerics.test_source is not None
 
 
 @dataclass
@@ -130,6 +165,9 @@ class Config:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d.pop("geometry_spec", None)
+        ts = d.get("numerics", {}).get("test_source")
+        if ts is not None:
+            d["numerics"]["test_source"] = {"position": list(ts["position"])}
         extra = d.pop("geometry_sections", None)
         if extra:
             merged: dict[str, Any] = {}
@@ -150,6 +188,14 @@ class Config:
         box = None if data.get("box") is None else Box(**data["box"])
         geometry = data.get("geometry", "box")
         geometry_spec = parse_geometry(data)
+        num_raw = data.get("numerics", {})
+        test_src = (
+            _parse_test_source(num_raw.get("test_source"))
+            if "test_source" in num_raw
+            else None
+        )
+        if test_src is not None and geometry != "parametric":
+            raise ValueError("numerics.test_source is allowed only with geometry='parametric'")
         radiator_raw = data.get("radiator")
         if radiator_raw is None:
             if geometry not in ("parametric", "step"):
@@ -170,7 +216,7 @@ class Config:
             box=box,
             radiator=radiator,
             band=Band(**data.get("band", {})),
-            numerics=Numerics(**data.get("numerics", {})),
+            numerics=_numerics_from_dict(num_raw),
             output=Output(**data.get("output", {})),
             geometry_spec=geometry_spec,
             geometry_sections=geometry_sections,
@@ -219,6 +265,8 @@ class Derived:
     cell_budget_exceeded: bool = False
     decimation_m: int = 1
     alias_level_db: float = float("nan")
+    test_source_cell_center: tuple[float, float, float] | None = None
+    test_source_cell_index: tuple[int, int, int] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Derived:
@@ -227,8 +275,14 @@ class Derived:
         blob = {k: v for k, v in data.items() if k in known}
         if "cpml_sides" in blob:
             blob["cpml_sides"] = tuple(blob["cpml_sides"])
+        if "test_source_cell_center" in blob and blob["test_source_cell_center"] is not None:
+            blob["test_source_cell_center"] = tuple(blob["test_source_cell_center"])
+        if "test_source_cell_index" in blob and blob["test_source_cell_index"] is not None:
+            blob["test_source_cell_index"] = tuple(blob["test_source_cell_index"])
         blob.setdefault("decimation_m", 1)
         blob.setdefault("alias_level_db", float("nan"))
+        blob.setdefault("test_source_cell_center", None)
+        blob.setdefault("test_source_cell_index", None)
         return cls(**blob)
 
 

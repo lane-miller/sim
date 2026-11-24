@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 
 from boxrad import __version__
-from boxrad.config import Config, Derived
+from boxrad.config import Config, Derived, test_source_active
 from boxrad.post.transfer import p_avg_tail_db
 from boxrad.post.zrad import log_frequency_grid, zrad_at_frequencies
 
@@ -28,6 +28,8 @@ _HUYGENS_POWER_NOTE = (
 
 def cells_across_radiator(cfg: Config, derived: Derived) -> float:
     if cfg.geometry_spec is not None:
+        if test_source_active(cfg) and not cfg.geometry_spec.radiators:
+            return float("nan")
         from boxrad.geomderive import _radiator_D_min
 
         return _radiator_D_min(cfg.geometry_spec) / derived.h

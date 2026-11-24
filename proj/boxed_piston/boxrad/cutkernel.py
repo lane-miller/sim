@@ -305,12 +305,24 @@ def _domain_args(p: np.ndarray) -> tuple[int, int, int, int, int, int]:
     return 0, nx, 0, ny, 0, nz
 
 
+def _inject_test_source(
+    fields: Fields,
+    flat_index: int,
+    coeff: np.float32,
+    v_q: np.float32,
+) -> None:
+    p_flat = fields.p.reshape(-1)
+    p_flat[int(flat_index)] += coeff * v_q
+
+
 def step_cut_dense(
     fields: Fields,
     coeffs: UpdateCoeffs,
     op: CutOperator,
     cpml: object | None,
     v_now_list: list[np.float32],
+    *,
+    test_source: tuple[int, np.float32, np.float32] | None = None,
 ) -> None:
     """Dense cut-cell leapfrog step (full-domain ``update_p_cut``; reference path)."""
     i_lo, i_hi, j_lo, j_hi, k_lo, k_hi = _domain_args(fields.p)
@@ -355,6 +367,9 @@ def step_cut_dense(
         coeffs.cp,
         op.inv_beta,
     )
+    if test_source is not None:
+        fi, coeff, v_q = test_source
+        _inject_test_source(fields, fi, coeff, v_q)
     for pi, rd in enumerate(op.radiators_patch):
         add_patch_flux(
             fields.p,
@@ -376,6 +391,8 @@ def step_cut(
     op: CutOperator,
     cpml: object | None,
     v_now_list: list[np.float32],
+    *,
+    test_source: tuple[int, np.float32, np.float32] | None = None,
 ) -> None:
     """Sparse cut-cell leapfrog step (precomputed closed faces and special cells)."""
     i_lo, i_hi, j_lo, j_hi, k_lo, k_hi = _domain_args(fields.p)
@@ -439,6 +456,9 @@ def step_cut(
         coeffs.cp,
         op.inv_beta,
     )
+    if test_source is not None:
+        fi, coeff, v_q = test_source
+        _inject_test_source(fields, fi, coeff, v_q)
     for pi, rd in enumerate(op.radiators_patch):
         add_patch_flux(
             fields.p,

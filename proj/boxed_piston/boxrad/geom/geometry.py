@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from boxrad.config import Config, derive
+from boxrad.config import Config, derive, test_source_active
 from boxrad.frames import Pose
 from boxrad.geom.mesh import (
     TriMesh,
@@ -124,27 +124,40 @@ def _primitive_mesh(part: PrimitiveSpec, tol: float) -> TriMesh:
     return m.transformed(part.pose.R, part.pose.position)
 
 
+def _empty_solid_mesh() -> TriMesh:
+    return TriMesh(
+        np.zeros((0, 3), dtype=_F64),
+        np.zeros((0, 3), dtype=np.int64),
+    )
+
+
 def from_parametric(cfg: Config, *, tol: float = 1e-5) -> Geometry:
     spec = cfg.geometry_spec
     if spec is None or spec.tag != "parametric":
         raise ValueError("expected parametric geometry")
     parts = [p for p in spec.parts if isinstance(p, PrimitiveSpec)]
-    meshes = [_primitive_mesh(p, tol) for p in parts]
-    if len(meshes) == 1:
-        solid = meshes[0]
-        precision = "analytic"
-    elif parts_disjoint(meshes):
-        cat = concat_meshes(meshes)
-        solid = weld(cat.vertices, cat.faces)
-        precision = "concat"
+    if not parts:
+        if not test_source_active(cfg):
+            raise ValueError("parametric geometry requires at least one part")
+        solid = _empty_solid_mesh()
+        precision = "empty"
     else:
-        united = union_meshes(meshes)
-        solid = weld(united.vertices, united.faces)
-        precision = _PRECISION_METHOD
-    if not solid.is_closed():
-        raise ValueError("parametric solid is not closed")
-    if solid.volume <= 0.0:
-        raise ValueError("parametric solid has non-positive volume")
+        meshes = [_primitive_mesh(p, tol) for p in parts]
+        if len(meshes) == 1:
+            solid = meshes[0]
+            precision = "analytic"
+        elif parts_disjoint(meshes):
+            cat = concat_meshes(meshes)
+            solid = weld(cat.vertices, cat.faces)
+            precision = "concat"
+        else:
+            united = union_meshes(meshes)
+            solid = weld(united.vertices, united.faces)
+            precision = _PRECISION_METHOD
+        if not solid.is_closed():
+            raise ValueError("parametric solid is not closed")
+        if solid.volume <= 0.0:
+            raise ValueError("parametric solid has non-positive volume")
     radiators = [_radiator_geom(rd, tol=tol) for rd in spec.radiators]
     return Geometry(
         solid=solid,
