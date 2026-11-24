@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sys
@@ -43,10 +44,14 @@ _FAR_DIRS = (
 _SHIFT_DELTAS = (0.25, 0.37, 0.5)
 _CENTER = np.array([0.0, 0.0, 0.0], dtype=_F64)
 _SPHERE_A = 0.05
+_SPHERE_VOL = (4.0 / 3.0) * math.pi * _SPHERE_A**3
 _GATE_C13A_DB = 0.1
 _GATE_C13A_DEG = 1.0
 _GATE_C16_P = 1.5
 _GATE_SHIFT = 0.003
+_CELL_ABORT = 15_000_000
+_CFL_SWEEP_VALUES = (0.7, 0.5)
+_CFL_SWEEP_REPORT = (0.99, *_CFL_SWEEP_VALUES)
 
 
 def _probes() -> np.ndarray:
@@ -62,13 +67,20 @@ def _probes() -> np.ndarray:
     )
 
 
-def _sample_points() -> np.ndarray:
-    ff = _FAR_R * np.stack([u for _, u in _FAR_DIRS], axis=0)
-    return np.vstack([_probes(), ff])
-
-
 def _load_base() -> dict[str, Any]:
     return json.loads(_CFG.read_text(encoding="utf-8"))
+
+
+def _config_cfl_default() -> float:
+    return float(_load_base()["numerics"]["cfl_safety"])
+
+
+def _cfl_suffix(cfl_safety: float) -> str:
+    return f"_cfl{cfl_safety:g}"
+
+
+def _out_path(tag: str, file_suffix: str) -> Path:
+    return _OUT / f"{tag}{file_suffix}.h5"
 
 
 def _content_bbox(cfg: Config) -> tuple[np.ndarray, np.ndarray]:
@@ -96,16 +108,19 @@ def _build_cfg(
     n: int,
     sphere: bool,
     center: np.ndarray | None = None,
+    cfl_safety: float | None = None,
 ) -> Config:
     raw = _load_base()
     h = 0.05 / n
     raw["numerics"]["h_override"] = h
+    if cfl_safety is not None:
+        raw["numerics"]["cfl_safety"] = float(cfl_safety)
     if not sphere:
         raw["parts"] = []
     elif center is not None:
         raw["parts"][0]["position"] = center.tolist()
     cfg = Config.from_dict(raw)
-    pts = _sample_points()
+    pts = np.asarray(raw["output"]["probes"], dtype=_F64)
     lo, hi = _content_bbox(cfg)
     gap = _gap_cells(lo, hi, pts, h)
     raw["numerics"]["gap_cells"] = gap
@@ -159,9 +174,19 @@ def _h_an(
     *,
     sphere: bool,
 ) -> complex:
+    f_scalar = float(np.asarray(f_hz, dtype=_F64).reshape(()))
+    points = np.atleast_2d(np.asarray(pt, dtype=_F64))
+    assert points.shape == (1, 3), f"points must be (1, 3), got {points.shape}"
+    center_v = np.asarray(center, dtype=_F64).reshape(3)
+    src_v = np.asarray(src, dtype=_F64).reshape(3)
+    assert center_v.shape == (3,)
+    assert src_v.shape == (3,)
     if sphere:
-        return complex(sphere_point_source(pt[np.newaxis, :], f_hz, center, _SPHERE_A, src, rho, c)[0])
-    _, p = monopole_free(pt[np.newaxis, :], f_hz, src, rho, c)
+        return complex(
+            sphere_point_source(points, f_scalar, center_v, _SPHERE_A, src_v, rho, c)[0]
+        )
+    _, p = monopole_free(points, f_scalar, src_v, rho, c)
+    assert p.shape == (1, 1)
     return complex(p[0, 0])
 
 
@@ -176,34 +201,106 @@ def _run_labeled(label: str, cfg: Config, out: Path) -> None:
     print(f"    wall {time.perf_counter() - t0:.1f} s")
 
 
-def _preflight() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def _planned_run_tags() -> list[tuple[str, int, bool, np.ndarray | None]]:
     specs: list[tuple[str, int, bool, np.ndarray | None]] = []
     for n in _NS:
         specs.append((f"sphere_n{n}", n, True, None))
         specs.append((f"free_n{n}", n, False, None))
+    h9 = 0.05 / 9
     for delta in _SHIFT_DELTAS:
-        h = 0.05 / 9
-        shift = delta * h * np.array([1.0, 1.0, 1.0], dtype=_F64)
+        shift = delta * h9 * np.array([1.0, 1.0, 1.0], dtype=_F64)
         specs.append((f"sphere_n9_d{delta:g}", 9, True, _CENTER + shift))
-    for name, n, sphere, cen in specs:
-        cfg = _build_cfg(n=n, sphere=sphere, center=cen)
+    return specs
+
+
+def _prepare_runs(
+    cfl_override: float | None,
+) -> tuple[list[dict[str, Any]], list[tuple[str, Config, Path]]]:
+    rows: list[dict[str, Any]] = []
+    run_specs: list[tuple[str, Config, Path]] = []
+    file_suffix = _cfl_suffix(cfl_override) if cfl_override is not None else ""
+    for tag, n, sphere, cen in _planned_run_tags():
+        cfg = _build_cfg(n=n, sphere=sphere, center=cen, cfl_safety=cfl_override)
         est = dry_run_geom(cfg)
-        ncell = int(np.prod(est["grid_shape"]))
+        shape = tuple(int(x) for x in est["grid_shape"])
+        ncell = int(np.prod(shape))
+        h = float(est["h"])
+        gap = int(cfg.numerics.gap_cells)  # type: ignore[arg-type]
+        n_steps = int(est["n_steps"])
+        out = _out_path(tag, file_suffix)
+        print(
+            f"preflight {tag}{file_suffix}  n={n}  h={h:.6g} m  gap_cells={gap}  "
+            f"grid={shape}  cells={ncell}  n_steps={n_steps}"
+            + (f"  cfl={cfl_override:g}" if cfl_override is not None else "")
+        )
+        if ncell > _CELL_ABORT:
+            raise SystemExit(
+                f"abort: planned run {tag!r} needs {ncell} cells (limit {_CELL_ABORT}); "
+                "check gap_cells (near-field probes only) and resolution."
+            )
         rows.append(
             {
-                "name": name,
+                "tag": tag,
+                "file_suffix": file_suffix,
+                "n": n,
+                "h_m": h,
+                "gap_cells": gap,
+                "grid_shape": shape,
                 "cells": ncell,
-                "h_mm": float(est["h"]) * 1e3,
-                "n_steps": int(est["n_steps"]),
-                "gap_cells": cfg.numerics.gap_cells,
+                "n_steps": n_steps,
+                "cfl_safety": cfl_override if cfl_override is not None else _config_cfl_default(),
             }
         )
-        print(
-            f"dry-run {name}: cells={ncell}  h={est['h'] * 1e3:.4g} mm  "
-            f"n_steps={est['n_steps']}  gap_cells={cfg.numerics.gap_cells}"
-        )
-    return rows
+        run_specs.append((tag, cfg, out))
+    return rows, run_specs
+
+
+def _prepare_cfl_sweep_runs() -> tuple[list[dict[str, Any]], list[tuple[str, Config, Path]]]:
+    rows: list[dict[str, Any]] = []
+    run_specs: list[tuple[str, Config, Path]] = []
+    for cfl in _CFL_SWEEP_VALUES:
+        suf = _cfl_suffix(cfl)
+        for sphere in (True, False):
+            tag = f"{'sphere' if sphere else 'free'}_n9{suf}"
+            out = _OUT / f"{tag}.h5"
+            if out.is_file():
+                print(f"preflight {tag}: skip FDTD (existing {out.name})")
+                continue
+            cfg = _build_cfg(n=9, sphere=sphere, cfl_safety=cfl)
+            est = dry_run_geom(cfg)
+            shape = tuple(int(x) for x in est["grid_shape"])
+            ncell = int(np.prod(shape))
+            h = float(est["h"])
+            gap = int(cfg.numerics.gap_cells)  # type: ignore[arg-type]
+            n_steps = int(est["n_steps"])
+            n_floored = int(est.get("n_floored", 0))
+            deq_h = float(est.get("delta_eq_over_h", 0.0))
+            print(
+                f"preflight {tag}  cfl={cfl}  h={h:.6g} m  gap_cells={gap}  "
+                f"grid={shape}  cells={ncell}  n_steps={n_steps}  "
+                f"n_floored={n_floored}  delta_eq/h={deq_h:.4g}"
+            )
+            if ncell > _CELL_ABORT:
+                raise SystemExit(
+                    f"abort: planned run {tag!r} needs {ncell} cells (limit {_CELL_ABORT}); "
+                    "check gap_cells (near-field probes only) and resolution."
+                )
+            rows.append(
+                {
+                    "tag": tag,
+                    "cfl_safety": cfl,
+                    "n": 9,
+                    "h_m": h,
+                    "gap_cells": gap,
+                    "grid_shape": shape,
+                    "cells": ncell,
+                    "n_steps": n_steps,
+                    "n_floored": n_floored,
+                    "delta_eq_over_h": deq_h,
+                }
+            )
+            run_specs.append((tag, cfg, out))
+    return rows, run_specs
 
 
 def _collect_ratio_block(
@@ -297,37 +394,417 @@ def _pairwise_orders(hs: list[float], es: list[float]) -> list[float]:
     return out
 
 
-def main() -> None:
-    _OUT.mkdir(parents=True, exist_ok=True)
-    json_path = _OUT / "c13a_c16.json"
-    png_path = _OUT / "c13a_c16.png"
+def _json_complex_safe(obj: Any) -> Any:
+    if isinstance(obj, complex):
+        return {"re": float(obj.real), "im": float(obj.imag)}
+    if isinstance(obj, dict):
+        return {str(k): _json_complex_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_complex_safe(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_json_complex_safe(v) for v in obj]
+    return obj
 
-    base_cfg = _build_cfg(n=9, sphere=True)
-    _assert_probe_centers(base_cfg)
-    rho = float(base_cfg.air.rho)
-    c = float(base_cfg.air.c)
-    src = np.array(base_cfg.numerics.test_source.position, dtype=_F64)  # type: ignore[union-attr]
 
-    print("=== preflight dry-run ===")
-    preflight = _preflight()
-
-    paths: dict[str, Path] = {}
-    run_specs: list[tuple[str, Config]] = []
-    for n in _NS:
-        run_specs.append((f"sphere_n{n}", _build_cfg(n=n, sphere=True)))
-        run_specs.append((f"free_n{n}", _build_cfg(n=n, sphere=False)))
+def _sphere_run_tags() -> list[str]:
+    tags = [f"sphere_n{n}" for n in _NS]
     for delta in _SHIFT_DELTAS:
-        h = 0.05 / 9
-        shift = delta * h * np.array([1.0, 1.0, 1.0], dtype=_F64)
-        run_specs.append((f"sphere_n9_d{delta:g}", _build_cfg(n=9, sphere=True, center=_CENTER + shift)))
+        tags.append(f"sphere_n9_d{delta:g}")
+    return tags
 
-    t_all = time.perf_counter()
-    with keep_awake("step10b2 c13a_c16"):
-        for name, cfg in run_specs:
-            out = _OUT / f"{name}.h5"
-            paths[name] = out
-            _run_labeled(name, cfg, out)
-    print(f"total wall {time.perf_counter() - t_all:.1f} s")
+
+def _cfg_for_sphere_tag(tag: str, cfl_override: float | None) -> Config:
+    if tag.startswith("sphere_n9_d"):
+        delta = float(tag.split("_d", 1)[1])
+        h9 = 0.05 / 9
+        cen = _CENTER + delta * h9 * np.array([1.0, 1.0, 1.0], dtype=_F64)
+        return _build_cfg(n=9, sphere=True, center=cen, cfl_safety=cfl_override)
+    n = int(tag.removeprefix("sphere_n"))
+    return _build_cfg(n=n, sphere=True, center=None, cfl_safety=cfl_override)
+
+
+def _free_tag_for_sphere(tag: str) -> str:
+    if tag == "sphere_n9" or tag.startswith("sphere_n9_d"):
+        return "free_n9"
+    n = int(tag.removeprefix("sphere_n"))
+    return f"free_n{n}"
+
+
+def _center_for_sphere_tag(tag: str) -> np.ndarray:
+    if tag.startswith("sphere_n9_d"):
+        delta = float(tag.split("_d", 1)[1])
+        h9 = 0.05 / 9
+        return _CENTER + delta * h9 * np.array([1.0, 1.0, 1.0], dtype=_F64)
+    return _CENTER.copy()
+
+
+def _load_fraction_floor_stats(
+    h5_path: Path, cfg: Config
+) -> tuple[dict[str, Any], dict[str, Any], float]:
+    with h5py.File(h5_path, "r") as f:
+        if "meta" in f:
+            h = float(f["meta"].attrs["h"])
+            raw = f["meta"].attrs.get("geom_stats_json")
+            if raw is not None:
+                text = raw if isinstance(raw, str) else bytes(raw).decode("utf-8")
+                blob = json.loads(text)
+                return (
+                    dict(blob["fractions_stats"]),
+                    dict(blob["floor_stats"]),
+                    h,
+                )
+    run = prepare_geom_run(cfg)
+    return (
+        dict(run.info["fractions_stats"]),
+        dict(run.info["floor_stats"]),
+        float(run.derived.h),
+    )
+
+
+def _max_probe_ratio_err(
+    sphere_h5: Path,
+    free_h5: Path,
+    f_hz: float,
+    center: np.ndarray,
+    rho: float,
+    c: float,
+    src: np.ndarray,
+) -> float:
+    err = 0.0
+    for qi, pt in enumerate(_probes()):
+        h_s = _h_fd(sphere_h5, f_hz, qi, None)
+        h_f = _h_fd(free_h5, f_hz, qi, None)
+        R_fd = h_s / h_f
+        p_s = _h_an(pt, f_hz, src, rho, c, center, sphere=True)
+        p_f = _h_an(pt, f_hz, src, rho, c, center, sphere=False)
+        R_an = p_s / p_f
+        err = max(err, abs(R_fd / R_an - 1.0))
+    return float(err)
+
+
+def _pearson(x: list[float], y: list[float]) -> float:
+    if len(x) != len(y) or len(x) < 2:
+        return float("nan")
+    xv = np.asarray(x, dtype=_F64)
+    yv = np.asarray(y, dtype=_F64)
+    if float(np.std(xv)) < 1e-30 or float(np.std(yv)) < 1e-30:
+        return float("nan")
+    return float(np.corrcoef(xv, yv)[0, 1])
+
+
+def _floor_diagnostic(
+    paths: dict[str, Path],
+    rho: float,
+    c: float,
+    src: np.ndarray,
+    cfl_override: float | None,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    by_tag: dict[str, dict[str, Any]] = {}
+    print(
+        "\nfloor diagnostic (sphere runs)\n"
+        f"{'run':<22} {'h_mm':>9} {'n_cut':>7} {'n_floor':>8} "
+        f"{'dV/V_sph':>10} {'deq/h':>8} {'|R-1|@1k':>10} {'|R-1|@3k':>10}"
+    )
+    for tag in _sphere_run_tags():
+        sp = paths[tag]
+        free_tag = _free_tag_for_sphere(tag)
+        fp = paths[free_tag]
+        cfg = _cfg_for_sphere_tag(tag, cfl_override)
+        center = _center_for_sphere_tag(tag)
+        fr_st, fl_st, h = _load_fraction_floor_stats(sp, cfg)
+        n_cut = int(fr_st.get("n_cut_cells", 0))
+        n_floored = int(fl_st.get("n_floored", 0))
+        dv = float(fl_st.get("delta_V", 0.0))
+        deq_h = float(fl_st.get("delta_eq_over_h", 0.0))
+        dv_over_v = dv / _SPHERE_VOL
+        e1k = _max_probe_ratio_err(sp, fp, 1000.0, center, rho, c, src)
+        e3k = _max_probe_ratio_err(sp, fp, 3000.0, center, rho, c, src)
+        row = {
+            "run": tag,
+            "h_m": h,
+            "n_cut_cells": n_cut,
+            "n_floored": n_floored,
+            "min_raw_beta_cut": float(fl_st.get("min_raw_beta_cut", 0.0)),
+            "delta_V": dv,
+            "delta_V_over_sphere_volume": dv_over_v,
+            "delta_eq_over_h": deq_h,
+            "max_abs_R_ratio_err_1khz_P0_P4": e1k,
+            "max_abs_R_ratio_err_3khz_P0_P4": e3k,
+        }
+        rows.append(row)
+        by_tag[tag] = row
+        print(
+            f"{tag:<22} {h * 1e3:9.4g} {n_cut:7d} {n_floored:8d} "
+            f"{dv_over_v:10.4g} {deq_h:8.4g} {e1k:10.4g} {e3k:10.4g}"
+        )
+
+    shift_tags = ["sphere_n9"] + [f"sphere_n9_d{d:g}" for d in _SHIFT_DELTAS]
+    deq_vals = [by_tag[t]["delta_eq_over_h"] for t in shift_tags]
+    nf_vals = [float(by_tag[t]["n_floored"]) for t in shift_tags]
+    e3_vals = [by_tag[t]["max_abs_R_ratio_err_3khz_P0_P4"] for t in shift_tags]
+    r_deq = _pearson(deq_vals, e3_vals)
+    r_nf = _pearson(nf_vals, e3_vals)
+    print(
+        f"\nn=9 shift Pearson vs max |R_fd/R_an-1| @3 kHz (n={len(shift_tags)}): "
+        f"delta_eq/h corr={r_deq:+.4f}  n_floored corr={r_nf:+.4f}"
+    )
+    return {
+        "rows": rows,
+        "pearson_n9_shift_vs_err_3khz": {
+            "tags": shift_tags,
+            "delta_eq_over_h_vs_err": r_deq,
+            "n_floored_vs_err": r_nf,
+        },
+    }
+
+
+def _air_and_source() -> tuple[float, float, np.ndarray]:
+    raw = _load_base()
+    return (
+        float(raw["air"]["rho"]),
+        float(raw["air"]["c"]),
+        np.array(raw["numerics"]["test_source"]["position"], dtype=_F64),
+    )
+
+
+def _register_tag_paths(
+    paths: dict[str, Path],
+    file_suffix: str,
+    *,
+    cfl_sweep: bool,
+) -> None:
+    for tag, _, _, _ in _planned_run_tags():
+        paths[tag] = _out_path(tag, file_suffix)
+    if cfl_sweep:
+        for cfl in _CFL_SWEEP_VALUES:
+            suf = _cfl_suffix(cfl)
+            for stem in ("sphere_n9", "free_n9"):
+                sweep_tag = f"{stem}{suf}"
+                paths[sweep_tag] = _OUT / f"{sweep_tag}.h5"
+
+
+def _paths_from_existing(
+    file_suffix: str,
+    *,
+    cfl_sweep: bool,
+) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    missing: list[Path] = []
+    _register_tag_paths(paths, file_suffix, cfl_sweep=cfl_sweep)
+    for tag, _, _, _ in _planned_run_tags():
+        p = paths[tag]
+        if not p.is_file():
+            missing.append(p)
+    if missing:
+        msg = "post-only: missing HDF5 output(s); run the showcase without --post-only first:\n"
+        msg += "\n".join(f"  {m}" for m in missing)
+        raise SystemExit(msg)
+    return paths
+
+
+def _n_steps_from_h5(h5_path: Path) -> int | None:
+    with h5py.File(h5_path, "r") as f:
+        if "meta" not in f:
+            return None
+        raw = f["meta"].attrs.get("n_steps")
+        if raw is None:
+            return None
+        return int(raw)
+
+
+def _cfl_sweep_tag_for(cfl: float) -> tuple[str, str]:
+    if abs(cfl - _config_cfl_default()) < 1e-12:
+        return "sphere_n9", "free_n9"
+    suf = _cfl_suffix(cfl)
+    return f"sphere_n9{suf}", f"free_n9{suf}"
+
+
+def _cfl_sweep_paths(paths: dict[str, Path]) -> list[tuple[float, Path, Path]]:
+    out: list[tuple[float, Path, Path]] = []
+    for cfl in _CFL_SWEEP_REPORT:
+        if abs(cfl - _config_cfl_default()) < 1e-12:
+            sp = _out_path("sphere_n9", "")
+            fp = _out_path("free_n9", "")
+        else:
+            sp_tag, fp_tag = _cfl_sweep_tag_for(cfl)
+            sp = paths.get(sp_tag, _OUT / f"{sp_tag}.h5")
+            fp = paths.get(fp_tag, _OUT / f"{fp_tag}.h5")
+        if not sp.is_file() or not fp.is_file():
+            continue
+        out.append((cfl, sp, fp))
+    return out
+
+
+def _max_ratio_errors_c13a(
+    sphere_h5: Path,
+    free_h5: Path,
+    freqs: tuple[float, ...],
+    center: np.ndarray,
+    rho: float,
+    c: float,
+    src: np.ndarray,
+    *,
+    include_far_field: bool,
+) -> dict[str, float]:
+    probes = _probes()
+    max_db = 0.0
+    max_deg = 0.0
+    max_ff_db = 0.0
+    max_ff_deg = 0.0
+    for f_hz in freqs:
+        for qi, pt in enumerate(probes):
+            h_s = _h_fd(sphere_h5, f_hz, qi, None)
+            h_f = _h_fd(free_h5, f_hz, qi, None)
+            R_fd = h_s / h_f
+            p_s = _h_an(pt, f_hz, src, rho, c, center, sphere=True)
+            p_f = _h_an(pt, f_hz, src, rho, c, center, sphere=False)
+            R_an = p_s / p_f
+            db, deg = _ratio_db_deg(R_fd, R_an)
+            max_db = max(max_db, abs(db))
+            max_deg = max(max_deg, abs(deg))
+        if include_far_field:
+            for _dname, u in _FAR_DIRS:
+                pt = _FAR_R * u
+                h_s = _h_fd(sphere_h5, f_hz, None, pt)
+                h_f = _h_fd(free_h5, f_hz, None, pt)
+                R_fd = h_s / h_f
+                p_s = _h_an(pt, f_hz, src, rho, c, center, sphere=True)
+                p_f = _h_an(pt, f_hz, src, rho, c, center, sphere=False)
+                R_an = p_s / p_f
+                db, deg = _ratio_db_deg(R_fd, R_an)
+                max_ff_db = max(max_ff_db, abs(db))
+                max_ff_deg = max(max_ff_deg, abs(deg))
+    out = {"max_probe_db": max_db, "max_probe_deg": max_deg}
+    if include_far_field:
+        out["max_far_db"] = max_ff_db
+        out["max_far_deg"] = max_ff_deg
+    return out
+
+
+def _cfl_sweep_report(
+    paths: dict[str, Path],
+    rho: float,
+    c: float,
+    src: np.ndarray,
+    preflight_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    print(
+        "\ncfl_sweep (n=9)\n"
+        f"{'cfl':>5} {'n_steps':>8} {'n_floor':>8} {'deq/h':>8} "
+        f"{'|dB|1k P0-4':>11} {'|deg|1k':>8} {'|dB|1k far':>10} "
+        f"{'|dB|3k P0-4':>11} {'|deg|3k':>8} {'|dB|3k far':>10}"
+    )
+    for cfl, sp, fp in _cfl_sweep_paths(paths):
+        cfg_cfl = _build_cfg(
+            n=9,
+            sphere=True,
+            cfl_safety=None if abs(cfl - _config_cfl_default()) < 1e-12 else cfl,
+        )
+        _, fl_st, _h = _load_fraction_floor_stats(sp, cfg_cfl)
+        n_floored = int(fl_st.get("n_floored", 0))
+        deq_h = float(fl_st.get("delta_eq_over_h", 0.0))
+        n_steps = _n_steps_from_h5(sp)
+        if n_steps is None:
+            sp_tag = "sphere_n9" if abs(cfl - _config_cfl_default()) < 1e-12 else _cfl_sweep_tag_for(cfl)[0]
+            for row in preflight_rows:
+                if row.get("tag") == sp_tag:
+                    n_steps = int(row["n_steps"])
+                    break
+        if n_steps is None:
+            est = dry_run_geom(cfg_cfl)
+            n_steps = int(est["n_steps"])
+        m1k = _max_ratio_errors_c13a(
+            sp, fp, (1000.0,), _CENTER, rho, c, src, include_far_field=True
+        )
+        m3k = _max_ratio_errors_c13a(
+            sp, fp, (3000.0,), _CENTER, rho, c, src, include_far_field=True
+        )
+        ent = {
+            "cfl_safety": cfl,
+            "n_steps": n_steps,
+            "n_floored": n_floored,
+            "delta_eq_over_h": deq_h,
+            "at_1khz": m1k,
+            "at_3khz": m3k,
+        }
+        entries.append(ent)
+        print(
+            f"{cfl:5.2f} {n_steps:8d} {n_floored:8d} {deq_h:8.4g} "
+            f"{m1k['max_probe_db']:11.4f} {m1k['max_probe_deg']:8.2f} "
+            f"{m1k.get('max_far_db', float('nan')):10.4f} "
+            f"{m3k['max_probe_db']:11.4f} {m3k['max_probe_deg']:8.2f} "
+            f"{m3k.get('max_far_db', float('nan')):10.4f}"
+        )
+    return {"entries": entries}
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--post-only",
+        action="store_true",
+        help="Skip preflight and FDTD; post-process existing outputs/step10b2/*.h5",
+    )
+    parser.add_argument(
+        "--cfl",
+        type=float,
+        default=None,
+        metavar="X",
+        help="Set numerics.cfl_safety=X on every run; suffix outputs and c13a_c16_cflX.* (default: config)",
+    )
+    parser.add_argument(
+        "--cfl-sweep",
+        action="store_true",
+        help="Run only missing sphere_n9/free_n9 at cfl 0.7 and 0.5; report 0.99/0.7/0.5",
+    )
+    args = parser.parse_args(argv)
+
+    cfl_override = args.cfl
+    file_suffix = _cfl_suffix(cfl_override) if cfl_override is not None else ""
+    report_stem = "c13a_c16" + (file_suffix if cfl_override is not None else "")
+
+    _OUT.mkdir(parents=True, exist_ok=True)
+    json_path = _OUT / f"{report_stem}.json"
+    png_path = _OUT / f"{report_stem}.png"
+
+    rho, c, src = _air_and_source()
+    preflight: list[dict[str, Any]] = []
+    paths: dict[str, Path] = {}
+
+    if args.post_only:
+        print("=== post-only (existing HDF5) ===")
+        paths = _paths_from_existing(file_suffix, cfl_sweep=args.cfl_sweep)
+    elif args.cfl_sweep:
+        print("=== cfl_sweep: preflight missing n=9 variants only ===")
+        preflight, run_specs = _prepare_cfl_sweep_runs()
+        _register_tag_paths(paths, file_suffix, cfl_sweep=True)
+        if not run_specs:
+            print("cfl_sweep: all variant outputs already present; no FDTD")
+        t_all = time.perf_counter()
+        with keep_awake("step10b2 c13a_c16 cfl_sweep"):
+            for name, cfg, out in run_specs:
+                paths[name] = out
+                _run_labeled(name, cfg, out)
+        if run_specs:
+            print(f"cfl_sweep FDTD wall {time.perf_counter() - t_all:.1f} s")
+        for tag, _, _, _ in _planned_run_tags():
+            paths.setdefault(tag, _out_path(tag, file_suffix))
+    else:
+        print("=== preflight (all planned runs, before FDTD) ===")
+        preflight, run_specs = _prepare_runs(cfl_override)
+        cfg_ref = next(cfg for tag, cfg, _ in run_specs if tag == "sphere_n9")
+        _assert_probe_centers(cfg_ref)
+        t_all = time.perf_counter()
+        with keep_awake("step10b2 c13a_c16"):
+            for name, cfg, out in run_specs:
+                paths[name] = out
+                if out.is_file():
+                    print(f"\n>>> skip {name} (existing {out.name})")
+                    continue
+                _run_labeled(name, cfg, out)
+        print(f"total wall {time.perf_counter() - t_all:.1f} s")
 
     if _staircase_available(_load_base()):
         print("staircase: running n=9 comparison (not implemented in numerics)")
@@ -337,11 +814,11 @@ def main() -> None:
     c13a = _collect_ratio_block(
         paths["sphere_n9"],
         paths["free_n9"],
+        _FREQS_C13A,
         _CENTER,
         rho,
         c,
         src,
-        _FREQS_C13A,
         include_abs_solo=True,
     )
     max_db = max(abs(e["db"]) for block in c13a["probes"] for e in block["entries"])
@@ -400,11 +877,20 @@ def main() -> None:
     ok_shift = max_shift <= _GATE_SHIFT
     print(f"gate shift spread max={max_shift:.4f} (≤ {_GATE_SHIFT})  {'PASS' if ok_shift else 'FAIL'}")
 
+    floor_diagnostic = _floor_diagnostic(paths, rho, c, src, cfl_override)
+
+    cfl_sweep: dict[str, Any] | None = None
+    if args.cfl_sweep:
+        cfl_sweep = _cfl_sweep_report(paths, rho, c, src, preflight)
+
     results: dict[str, Any] = {
+        "cfl_safety": cfl_override if cfl_override is not None else _config_cfl_default(),
+        "output_suffix": file_suffix,
         "preflight": preflight,
         "c13a": c13a,
         "c16": {"h_m": hs, "e": es, "p_observed": p_obs, "pairwise_p": pair},
         "shift_spread": shift_spread,
+        "floor_diagnostic": floor_diagnostic,
         "gates": {
             "c13a_pass": ok_c13a,
             "c16_pass": ok_c16,
@@ -413,7 +899,12 @@ def main() -> None:
         },
         "staircase": "not available",
     }
-    json_path.write_text(json.dumps(to_json_safe(results), indent=2), encoding="utf-8")
+    if cfl_sweep is not None:
+        results["cfl_sweep"] = cfl_sweep
+    json_path.write_text(
+        json.dumps(to_json_safe(_json_complex_safe(results)), indent=2),
+        encoding="utf-8",
+    )
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.8))
     for qi in range(5):
@@ -458,4 +949,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
