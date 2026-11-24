@@ -16,7 +16,7 @@ from boxrad.geomrun import prepare_geom_run, step_geom
 from boxrad.grid import allocate_fields
 from boxrad.kernels import make_update_coeffs
 from boxrad.source import velocity_at_half_step
-from boxrad.validation.analytic import monopole_free
+from boxrad.validation.analytic import monopole_free, sphere_point_source
 
 _PKG = Path(__file__).resolve().parents[1]
 _C19 = _PKG / "configs" / "showcase" / "c19_sym_full.json"
@@ -245,3 +245,74 @@ def test_coarse_free_field_vs_analytic(tmp_path):
             h_fd = p_fd / res._radiator_v_at_f(f_hz)
             db, deg = h_transfer_err(p_ref[0, 0], h_fd)
             assert db <= 0.3 and abs(deg) <= 2.0
+
+
+@pytest.mark.slow
+def test_coarse_sphere_ratio_vs_analytic(tmp_path):
+    rho = 1.204
+    c = 343.0
+    center = np.array([0.0, 0.0, 0.0])
+    src = np.array([0.0, 0.0, 0.1])
+    pt = np.array([0.15, 0.0, 0.0])
+    f_hz = 500.0
+    h = 0.05 / 6
+    common = {
+        "geometry": "parametric",
+        "radiators": [],
+        "band": {"f_min": 50.0, "f_max": 1000.0},
+        "air": {"c": c, "rho": rho},
+        "numerics": {
+            "h_override": h,
+            "n_transits": 6.0,
+            "gap_cells": 24,
+            "cpml_cells": 12,
+            "test_source": {"position": src.tolist()},
+        },
+        "output": {"path": "", "probes": [pt.tolist()]},
+    }
+    sphere_cfg = _cfg(
+        {
+            **common,
+            "parts": [
+                {
+                    "sphere": {"d": 0.1},
+                    "position": [0.0, 0.0, 0.0],
+                    "normal": [0.0, 0.0, 1.0],
+                }
+            ],
+        }
+    )
+    free_cfg = _cfg({**common, "parts": []})
+    from boxrad.geomrec import GeomRecorder
+
+    for tag, cfg in (("sphere", sphere_cfg), ("free", free_cfg)):
+        run = prepare_geom_run(cfg)
+        out = tmp_path / f"{tag}.h5"
+        rec = GeomRecorder(cfg, run.derived, run.gg, run.geometry, run.info, out)
+        n_cap = min(800, run.derived.n_steps)
+        for n in range(n_cap):
+            step_geom(run, n)
+            rec.sample(run.fields, n)
+        rec.close()
+
+    import h5py
+
+    from boxrad import Result
+    from boxrad.post.transfer import probe_fdtd_pressure_spectrum
+
+    with h5py.File(tmp_path / "sphere.h5", "r") as f:
+        t_sp = np.asarray(f["probes/times_p"][()], dtype=np.float64)
+        p_sp = np.asarray(f["probes/p"][()], dtype=np.float64)
+    with h5py.File(tmp_path / "free.h5", "r") as f:
+        t_fr = np.asarray(f["probes/times_p"][()], dtype=np.float64)
+        p_fr = np.asarray(f["probes/p"][()], dtype=np.float64)
+    with Result(tmp_path / "sphere.h5") as res_s, Result(tmp_path / "free.h5") as res_f:
+        p_s = probe_fdtd_pressure_spectrum(p_sp, t_sp, f_hz, 0)
+        p_f = probe_fdtd_pressure_spectrum(p_fr, t_fr, f_hz, 0)
+        h_s = p_s / res_s._radiator_v_at_f(f_hz)
+        h_f = p_f / res_f._radiator_v_at_f(f_hz)
+    R_fd = h_s / h_f
+    p_an_s = sphere_point_source(pt[np.newaxis, :], f_hz, center, 0.05, src, rho, c)[0]
+    _, p_an_f = monopole_free(pt[np.newaxis, :], f_hz, src, rho, c)
+    R_an = p_an_s / p_an_f[0, 0]
+    assert abs(R_fd / R_an - 1.0) <= 0.05

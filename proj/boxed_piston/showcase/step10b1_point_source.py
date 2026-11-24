@@ -114,9 +114,8 @@ def main() -> None:
                 db, deg = h_transfer_err(p_ref[0, 0], h_fd)
                 print(f"  probe {q} @{cen}  dB {db:+.4f}  deg {deg:+.2f}")
                 row_p["probes"].append({"db": db, "deg": deg, "center": cen.tolist()})
-                if q < 3:
-                    probe_db.append(db)
-                    probe_ph.append(deg)
+                probe_db.append(db)
+                probe_ph.append(deg)
             results["probes"].append(row_p)
 
             row_ff: dict[str, Any] = {"f_hz": f_hz, "directions": []}
@@ -165,16 +164,16 @@ def main() -> None:
     json_path.write_text(json.dumps(to_json_safe(results), indent=2), encoding="utf-8")
 
     fig, axes = plt.subplots(1, 3, figsize=(11, 3.5))
-    axes[0].plot(_FREQS, probe_db[0::3], "o-", label="probe 0")
-    axes[0].plot(_FREQS, probe_db[1::3], "s-", label="probe 1")
-    axes[0].plot(_FREQS, probe_db[2::3], "^-", label="probe 2")
+    n_pr = 4
+    _markers = ("o", "s", "^", "d")
+    for q in range(n_pr):
+        axes[0].plot(_FREQS, probe_db[q::n_pr], f"{_markers[q]}-", label=f"probe {q}")
     axes[0].set_ylabel("dB err")
     axes[0].set_xlabel("f [Hz]")
     axes[0].legend(fontsize=8)
     axes[0].set_title("probes dB")
-    axes[1].plot(_FREQS, probe_ph[0::3], "o-", label="probe 0")
-    axes[1].plot(_FREQS, probe_ph[1::3], "s-", label="probe 1")
-    axes[1].plot(_FREQS, probe_ph[2::3], "^-", label="probe 2")
+    for q in range(n_pr):
+        axes[1].plot(_FREQS, probe_ph[q::n_pr], f"{_markers[q]}-", label=f"probe {q}")
     axes[1].set_ylabel("deg err")
     axes[1].set_xlabel("f [Hz]")
     axes[1].set_title("probes phase")
