@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sys
@@ -46,6 +47,9 @@ _BEM_H_MAX = 0.02
 _BEM_RAD_DIV = 8
 _BEM_EPW_REFINE = 18.0
 _BEM_RAD_DIV_REFINE = 12
+_BEM_RAD_REFINE_FREQS_HZ = (300.0, 1000.0)
+_BEM_RAD_REFINE_H_RAD_M = (0.06 / 6.0, 0.06 / 12.0, 0.06 / 24.0)
+_BEM_RAD_REFINE_H_RAD_REF_M = _BEM_RAD_REFINE_H_RAD_M[-1]
 _FAR_M = 20.0
 _FAR_PT = np.array([[0.0, 0.0, _FAR_M]], dtype=_F64)
 _GATE_TILT_MARGIN = 0.01
@@ -203,7 +207,84 @@ def _H_bem(sol: NeumannBmResult, rho: float, c: float) -> complex:
     return p / (rho * c)
 
 
-def main() -> int:
+def _bem_radiator_refinement_report(
+    geom: dict[str, Any],
+    mesh_cache: BoxMeshCache,
+) -> dict[str, Any]:
+    """C9 BEM solves varying radiator cap spacing only (no disk cache)."""
+    W, H, D = geom["W"], geom["H"], geom["D"]
+    origin = geom["origin"]
+    rad_rect = geom["rad_rect"]
+    rho, c = geom["rho"], geom["c"]
+    rw, rh = rad_rect
+    h_rad_main = min(rw, rh) / float(_BEM_RAD_DIV)
+    print(
+        f"\n=== BEM radiator refinement (report only; main h_rad="
+        f"{h_rad_main * 1e3:.4g} mm) ===",
+        flush=True,
+    )
+    rows: list[dict[str, Any]] = []
+    for f_hz in _BEM_RAD_REFINE_FREQS_HZ:
+        f_key = float(f_hz)
+        h_tgt = h_target_from_frequency(
+            f_key, c, epw=_BEM_EPW, h_max=_BEM_H_MAX
+        )
+        solved: list[tuple[float, complex, int]] = []
+        for h_rad in _BEM_RAD_REFINE_H_RAD_M:
+            h_rad_f = float(h_rad)
+            grid = mesh_cache.get(
+                W, H, D, rad_rect, origin, h_tgt, h_rad=h_rad_f
+            )
+            k = 2.0 * math.pi * f_key / c
+            sol = solve_neumann_bm(
+                grid, k, vn_P0=1.0, rho=rho, c=c, log_dof=False
+            )
+            z = sol.zrad()
+            n_dof = int(sol.stats.n_dofs) if sol.stats is not None else 0
+            solved.append((h_rad_f, z, n_dof))
+        im_ref = float(
+            next(z for h, z, _ in solved if h == _BEM_RAD_REFINE_H_RAD_REF_M).imag
+        )
+        for h_rad_f, z, n_dof in solved:
+            d_im = 0.0 if h_rad_f == _BEM_RAD_REFINE_H_RAD_REF_M else float(z.imag) - im_ref
+            rows.append(
+                {
+                    "f_hz": f_key,
+                    "h_tgt_m": float(h_tgt),
+                    "h_rad_m": h_rad_f,
+                    "h_rad_mm": float(h_rad_f * 1e3),
+                    "n_dof": n_dof,
+                    "z_real": float(z.real),
+                    "z_imag": float(z.imag),
+                    "dIm_vs_h_rad_finest": d_im,
+                }
+            )
+            print(
+                f"  bem-refine f={f_key:.0f} Hz h_rad={h_rad_f * 1e3:.4g} mm "
+                f"DOF={n_dof}  Re z={z.real:+.6g}  Im z={z.imag:+.6g}  "
+                f"dIm={d_im:+.6g}",
+                flush=True,
+            )
+    return {
+        "epw": _BEM_EPW,
+        "h_max_m": _BEM_H_MAX,
+        "main_h_rad_m": float(h_rad_main),
+        "main_h_rad_mm": float(h_rad_main * 1e3),
+        "h_rad_levels_m": list(_BEM_RAD_REFINE_H_RAD_M),
+        "h_rad_ref_m": float(_BEM_RAD_REFINE_H_RAD_REF_M),
+        "frequencies_hz": list(_BEM_RAD_REFINE_FREQS_HZ),
+        "rows": rows,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--bem-refine",
+        action="store_true",
+        help="Report-only: radiator h_rad convergence at 300 and 1000 Hz",
+    )
+    args = parser.parse_args(argv)
     t0 = time.perf_counter()
     _OUT.mkdir(parents=True, exist_ok=True)
     _BEM_CACHE.mkdir(parents=True, exist_ok=True)
@@ -364,6 +445,10 @@ def main() -> int:
                 flush=True,
             )
 
+    bem_radiator_refinement: dict[str, Any] | None = None
+    if args.bem_refine:
+        bem_radiator_refinement = _bem_radiator_refinement_report(geom, mesh_cache)
+
     gates: dict[str, Any] = {"c18ii": {}, "report_only": {}}
     tilt_pass = True
     tilt_rows: list[dict[str, Any]] = []
@@ -469,30 +554,41 @@ def main() -> int:
     plt.close(fig)
 
     elapsed = time.perf_counter() - t0
-    payload = to_json_safe(
-        {
-            "geometry": {
-                "W": geom["W"],
-                "H": geom["H"],
-                "D": geom["D"],
-                "rad_rect": list(geom["rad_rect"]),
-                "origin": list(geom["origin"]),
-            },
-            "frequencies_hz": list(_FREQS_HZ),
-            "bem_epw": _BEM_EPW,
-            "bem_self_check": bem_self_check,
-            "bem_z_by_f": {
-                str(f): {"real": float(bem_z[f].real), "imag": float(bem_z[f].imag)}
-                for f in bem_z
-            },
-            "table": rows,
-            "fdtd_sources": fdtd,
-            "gates": gates,
-            "elapsed_s": elapsed,
-        }
-    )
+    payload: dict[str, Any] = {
+        "geometry": {
+            "W": geom["W"],
+            "H": geom["H"],
+            "D": geom["D"],
+            "rad_rect": list(geom["rad_rect"]),
+            "origin": list(geom["origin"]),
+        },
+        "frequencies_hz": list(_FREQS_HZ),
+        "bem_epw": _BEM_EPW,
+        "bem_self_check": bem_self_check,
+        "bem_z_by_f": {
+            str(f): {"real": float(bem_z[f].real), "imag": float(bem_z[f].imag)}
+            for f in bem_z
+        },
+        "table": rows,
+        "fdtd_sources": fdtd,
+        "gates": gates,
+        "elapsed_s": elapsed,
+    }
+    if bem_radiator_refinement is not None:
+        payload["bem_radiator_refinement"] = bem_radiator_refinement
     json_path = _OUT / "c18_bem.json"
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    merged = payload
+    if json_path.is_file():
+        try:
+            prior = json.loads(json_path.read_text(encoding="utf-8"))
+            if isinstance(prior, dict):
+                prior.update(payload)
+                merged = prior
+        except json.JSONDecodeError:
+            pass
+    json_path.write_text(
+        json.dumps(to_json_safe(merged), indent=2), encoding="utf-8"
+    )
     print(f"\nwrote {json_path} and {png_path}  ({elapsed:.1f} s)", flush=True)
     print(
         f"C18(ii) gate pass={gates['c18ii']['pass']}  "
