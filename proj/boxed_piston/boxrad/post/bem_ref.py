@@ -47,13 +47,148 @@ def h_target_from_frequency(
 
 
 def h_target_sphere(ka: float, a: float, *, epw: float = _DEFAULT_EPW) -> float:
-    """Sphere mesh target: min(λ/epw, a/4) with λ = 2πa/ka."""
+    """Sphere mesh target: min(λ/epw, a/4) with λ = 2πa/ka.
+
+    At low *ka*, icosphere faceting—not wavelength—limits accuracy; the *a*/4
+    cap keeps enough elements per radius for the pulsating-sphere checks.
+    """
     ka = float(ka)
     a = float(a)
     if ka <= 0.0 or a <= 0.0:
         raise ValueError("ka and a must be positive")
     wavelength = 2.0 * math.pi * a / ka
     return min(wavelength / float(epw), 0.25 * a)
+
+
+_ICO_FACES: tuple[tuple[int, int, int], ...] = (
+    (0, 11, 5),
+    (0, 5, 1),
+    (0, 1, 7),
+    (0, 7, 10),
+    (0, 10, 11),
+    (1, 5, 9),
+    (5, 11, 4),
+    (11, 10, 2),
+    (10, 7, 6),
+    (7, 1, 8),
+    (3, 9, 4),
+    (3, 4, 2),
+    (3, 2, 6),
+    (3, 6, 8),
+    (3, 8, 9),
+    (4, 9, 5),
+    (2, 4, 11),
+    (6, 2, 10),
+    (8, 6, 7),
+    (9, 8, 1),
+)
+
+
+def _icosahedron_unit_vertices() -> list[np.ndarray]:
+    t = (1.0 + math.sqrt(5.0)) / 2.0
+    raw = [
+        (-1.0, t, 0.0),
+        (1.0, t, 0.0),
+        (-1.0, -t, 0.0),
+        (1.0, -t, 0.0),
+        (0.0, -1.0, t),
+        (0.0, 1.0, t),
+        (0.0, -1.0, -t),
+        (0.0, 1.0, -t),
+        (t, 0.0, -1.0),
+        (t, 0.0, 1.0),
+        (-t, 0.0, -1.0),
+        (-t, 0.0, 1.0),
+    ]
+    return [
+        (np.asarray(row, dtype=_F64) / np.linalg.norm(np.asarray(row, dtype=_F64)))
+        for row in raw
+    ]
+
+
+def _mesh_max_edge(verts: Sequence[np.ndarray], faces: Sequence[tuple[int, int, int]]) -> float:
+    mx = 0.0
+    for i0, i1, i2 in faces:
+        for a, b in ((i0, i1), (i1, i2), (i2, i0)):
+            mx = max(mx, float(np.linalg.norm(verts[b] - verts[a])))
+    return mx
+
+
+def _subdivide_triangles(
+    verts: list[np.ndarray],
+    faces: Sequence[tuple[int, int, int]],
+) -> tuple[list[np.ndarray], list[tuple[int, int, int]]]:
+    edge_mid: dict[tuple[int, int], int] = {}
+    out_verts = list(verts)
+    out_faces: list[tuple[int, int, int]] = []
+
+    def _midpoint(i: int, j: int) -> int:
+        a, b = (i, j) if i < j else (j, i)
+        if (a, b) not in edge_mid:
+            edge_mid[(a, b)] = len(out_verts)
+            out_verts.append(0.5 * (out_verts[a] + out_verts[b]))
+        return edge_mid[(a, b)]
+
+    for i0, i1, i2 in faces:
+        m01 = _midpoint(i0, i1)
+        m12 = _midpoint(i1, i2)
+        m20 = _midpoint(i2, i0)
+        out_faces.extend(
+            (
+                (i0, m01, m20),
+                (i1, m12, m01),
+                (i2, m20, m12),
+                (m01, m12, m20),
+            )
+        )
+    return out_verts, out_faces
+
+
+_ICOSPHERE_MAX_LEVEL = 6
+_ICOSPHERE_MAX_ELEMENTS = 20 * (4**_ICOSPHERE_MAX_LEVEL)
+
+
+def _vertices_on_sphere(verts: Sequence[np.ndarray], r: float) -> list[np.ndarray]:
+    return [v / (np.linalg.norm(v) + 1e-300) * float(r) for v in verts]
+
+
+def icosphere(r: float, h: float) -> bempp.Grid:
+    """Closed sphere surface: regular icosahedron with midpoint subdivision to edge length ≤ *h*."""
+    r = float(r)
+    h = float(h)
+    if r <= 0.0 or h <= 0.0:
+        raise ValueError("r and h must be positive")
+    verts = _icosahedron_unit_vertices()
+    faces = list(_ICO_FACES)
+    level = 0
+    while _mesh_max_edge(_vertices_on_sphere(verts, r), faces) > h:
+        if level >= _ICOSPHERE_MAX_LEVEL:
+            raise ValueError(
+                f"icosphere(r={r}, h={h}) requires more than {_ICOSPHERE_MAX_LEVEL} "
+                f"subdivision levels (> {_ICOSPHERE_MAX_ELEMENTS} elements); "
+                f"increase h or decrease r"
+            )
+        verts, faces = _subdivide_triangles(verts, faces)
+        level += 1
+    verts = _vertices_on_sphere(verts, r)
+    elements: list[list[int]] = []
+    for i0, i1, i2 in faces:
+        v0, v1, v2 = verts[i0], verts[i1], verts[i2]
+        cross = np.cross(v1 - v0, v2 - v0)
+        n_hat = cross / (np.linalg.norm(cross) + 1e-300)
+        centroid = (v0 + v1 + v2) / 3.0
+        if float(np.dot(centroid, n_hat)) <= 0.0:
+            i1, i2 = i2, i1
+            v0, v1, v2 = verts[i0], verts[i1], verts[i2]
+            cross = np.cross(v1 - v0, v2 - v0)
+            n_hat = cross / (np.linalg.norm(cross) + 1e-300)
+            centroid = (v0 + v1 + v2) / 3.0
+        assert float(np.dot(centroid, n_hat)) > 0.0
+        elements.append([i0, i1, i2])
+    v_arr = np.array(verts, dtype=_F64).T
+    elems = np.array(elements, dtype=np.int32).T
+    tags = np.full(elems.shape[1], RADIATOR_TAG, dtype=np.int32)
+    return bempp.Grid(v_arr, elems, domain_indices=tags)
 
 
 def dedupe_frequencies_hz(freqs: Sequence[float], *, sep_hz: float = 1.0) -> np.ndarray:

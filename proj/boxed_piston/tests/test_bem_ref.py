@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 
 import bempp_cl.api as bempp
@@ -16,6 +17,7 @@ from boxrad.post.bem_ref import (
     dedupe_frequencies_hz,
     h_target_from_frequency,
     h_target_sphere,
+    icosphere,
     p1_interpolate_at,
     pulsating_sphere_H_transfer,
     solve_neumann_bm,
@@ -130,6 +132,27 @@ def test_box_mesh_topology_and_normals():
     if inward_by_face:
         detail = ", ".join(f"{k}: {v}" for k, v in sorted(inward_by_face.items()))
         pytest.fail(f"inward triangle count by face ({detail})")
+
+
+def test_icosphere_size():
+    a, h_tgt = 0.05, 0.01
+    grid = icosphere(a, h_tgt)
+    elems = np.asarray(grid.elements, dtype=np.int32).T
+    n_tri = elems.shape[0]
+    assert n_tri in (20 * (4**n) for n in range(4)), f"unexpected triangle count {n_tri}"
+    verts = np.asarray(grid.vertices, dtype=np.float64).T
+    radii = np.linalg.norm(verts, axis=1)
+    assert np.max(np.abs(radii - a)) <= 1e-12
+    tri_verts = verts[elems]
+    e01 = np.linalg.norm(tri_verts[:, 1] - tri_verts[:, 0], axis=1)
+    e12 = np.linalg.norm(tri_verts[:, 2] - tri_verts[:, 1], axis=1)
+    e20 = np.linalg.norm(tri_verts[:, 0] - tri_verts[:, 2], axis=1)
+    max_edge = float(np.max(np.maximum(np.maximum(e01, e12), e20)))
+    assert max_edge <= h_tgt * (1.0 + 1e-9)
+    centers = np.asarray(grid.centroids)
+    normals = np.asarray(grid.normals)
+    outward = np.sum(centers * normals, axis=1)
+    assert np.all(outward > 0.0)
 
 
 def test_h_target_and_dedupe_frequencies():
@@ -289,6 +312,27 @@ def test_box_mesh_areas():
     assert np.any(tags == BOX_TAG)
 
 
+_SPHERE_A = 0.05
+_SPHERE_RHO = 1.204
+_SPHERE_C = 343.0
+
+
+@functools.lru_cache(maxsize=None)
+def _sphere_solution(ka: float, epw: int):
+    k = float(ka) / _SPHERE_A
+    h_mesh = h_target_sphere(ka, _SPHERE_A, epw=epw)
+    grid = icosphere(_SPHERE_A, h_mesh)
+    return solve_neumann_bm(
+        grid,
+        k,
+        vn_P0=1.0,
+        rho=_SPHERE_RHO,
+        c=_SPHERE_C,
+        pulsating_sphere=True,
+        log_dof=False,
+    )
+
+
 def _assert_H_close(H_bem: complex, H_ref: complex, *, mag_pct: float, phase_deg: float) -> None:
     mag_err = abs(abs(H_bem) - abs(H_ref)) / max(abs(H_ref), 1e-30)
     assert mag_err <= mag_pct, f"|H| err {100 * mag_err:.2f}% > {100 * mag_pct:.1f}%"
@@ -316,15 +360,9 @@ def _assert_H_close(H_bem: complex, H_ref: complex, *, mag_pct: float, phase_deg
 )
 def test_pulsating_sphere_field_at(ka: float, r_mult: float) -> None:
     """Exterior D[p]−S[q] agrees with analytic transfer on +z axis."""
-    a = 0.05
-    rho, c = 1.204, 343.0
-    k = ka / a
+    a = _SPHERE_A
     r_m = r_mult * a
-    h_mesh = h_target_sphere(ka, a, epw=12)
-    grid = bempp.shapes.sphere(r=a, h=h_mesh)
-    sol = solve_neumann_bm(
-        grid, k, vn_P0=1.0, rho=rho, c=c, pulsating_sphere=True, log_dof=False
-    )
+    sol = _sphere_solution(ka, 12)
     pt = np.array([[0.0, 0.0, r_m]], dtype=np.float64)
     H_bem = complex(sol.transfer_at(pt, on_surface=False)[0])
     H_ref = pulsating_sphere_H_transfer(r_m, a, ka)
@@ -335,12 +373,7 @@ def test_pulsating_sphere_field_at(ka: float, r_mult: float) -> None:
 @pytest.mark.parametrize("ka", [0.2, 1.0, math.pi, 4.0])
 def test_pulsating_sphere_zrad(ka: float):
     """Closed-form z = jka/(1+jka); π case exercises irregular-frequency neighborhood."""
-    a = 0.05
-    rho, c = 1.204, 343.0
-    k = ka / a
-    h_mesh = h_target_sphere(ka, a, epw=10)
-    grid = bempp.shapes.sphere(r=a, h=h_mesh)
-    sol = solve_neumann_bm(grid, k, vn_P0=1.0, rho=rho, c=c, pulsating_sphere=True)
+    sol = _sphere_solution(ka, 10)
     z_bem = sol.zrad()
     z_ref = zrad_sphere_analytic(ka)
     assert abs(z_bem - z_ref) <= 0.01

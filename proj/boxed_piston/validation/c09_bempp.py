@@ -34,6 +34,7 @@ from boxrad.post.bem_ref import (  # noqa: E402
     format_bem_progress_line,
     h_target_from_frequency,
     h_target_sphere,
+    icosphere,
     load_c09_bem_cache,
     save_c09_bem_cache,
     NeumannBmResult,
@@ -648,8 +649,6 @@ def _surface_report_points(
 
 
 def _g0_sphere_check(rho: float, c: float) -> bool:
-    import bempp_cl.api as bempp
-
     print("\n=== G0 pulsating-sphere self-check ===", flush=True)
     ok_all = True
     n = len(_G0_KA)
@@ -659,7 +658,7 @@ def _g0_sphere_check(rho: float, c: float) -> bool:
         k = ka / a
         f_hz = k * c / (2.0 * math.pi)
         h_mesh = h_target_sphere(ka, a, epw=_BEM_EPW)
-        grid = bempp.shapes.sphere(r=a, h=h_mesh)
+        grid = icosphere(a, h_mesh)
         sol = solve_neumann_bm(
             grid, k, vn_P0=1.0, rho=rho, c=c, pulsating_sphere=True, log_dof=False
         )

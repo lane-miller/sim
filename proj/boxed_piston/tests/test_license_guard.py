@@ -90,3 +90,44 @@ def test_cad_imports_clean() -> None:
     import OCP  # noqa: F401
 
     _assert_modules_absent(forbid_ocp=False)
+
+
+_GMSH_RE = re.compile(r"\bgmsh\b", re.IGNORECASE)
+_FORBIDDEN_BEMPP_SHAPE_IMPORTS = ("bempp.shapes", "bempp_cl.api.shapes")
+_SKIP_SCAN_DIR_NAMES = frozenset({".venv", "build", "__pycache__"})
+
+
+def _iter_proj_python_sources() -> list[Path]:
+    out: list[Path] = []
+    for path in sorted(ROOT.rglob("*.py")):
+        if any(part in _SKIP_SCAN_DIR_NAMES for part in path.parts):
+            continue
+        out.append(path)
+    return out
+
+
+def test_proj_boxed_piston_no_gmsh() -> None:
+    """No gmsh or bempp-cl shape helpers under proj/boxed_piston (they spawn gmsh)."""
+    self_path = Path(__file__).resolve()
+    hits: list[str] = []
+    for path in _iter_proj_python_sources():
+        if path.resolve() == self_path:
+            continue
+        rel = path.relative_to(ROOT)
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if _GMSH_RE.search(line):
+                hits.append(f"{rel}:{lineno}: {line.rstrip()}")
+            for token in _FORBIDDEN_BEMPP_SHAPE_IMPORTS:
+                if token in line:
+                    hits.append(f"{rel}:{lineno}: {line.rstrip()}")
+    if hits:
+        pytest.fail(
+            "forbidden gmsh / bempp shapes references in proj/boxed_piston:\n"
+            + "\n".join(hits)
+        )
+    import boxrad  # noqa: F401
+    from boxrad.post import bem_ref  # noqa: F401
+
+    assert "gmsh" not in sys.modules
