@@ -41,11 +41,23 @@ def _load_json(path: Path) -> Config:
     return Config.from_json(path.read_text(encoding="utf-8"))
 
 
-def _h_cfg(base: Config, h: float, *, gap_cells: int | None = None) -> Config:
+def _cfl_suffix(cfl_safety: float) -> str:
+    return f"_cfl{cfl_safety:g}"
+
+
+def _h_cfg(
+    base: Config,
+    h: float,
+    *,
+    gap_cells: int | None = None,
+    cfl_safety: float | None = None,
+) -> Config:
     raw = json.loads(base.to_json())
     raw["numerics"]["h_override"] = h
     if gap_cells is not None:
         raw["numerics"]["gap_cells"] = gap_cells
+    if cfl_safety is not None:
+        raw["numerics"]["cfl_safety"] = float(cfl_safety)
     return Config.from_dict(raw)
 
 
@@ -134,6 +146,26 @@ def _richardson_limit(e_mid: float, e_fine: float, p: float, *, r: float) -> flo
     return e_fine + (e_fine - e_mid) / denom
 
 
+def _level_h5_name(
+    base_name: str,
+    idx: int,
+    *,
+    fixed_gap_m: float | None,
+    gap_cells: int,
+    file_suffix: str = "",
+) -> tuple[str, bool]:
+    reuse_default_h1 = (
+        fixed_gap_m is not None
+        and idx == 1
+        and gap_cells == DEFAULT_GAP_CELLS
+    )
+    suffix = ""
+    if fixed_gap_m is not None and not reuse_default_h1:
+        suffix = "_g"
+    name = f"{base_name}_h{idx}{suffix}{file_suffix}.h5"
+    return name, reuse_default_h1
+
+
 def _run_level(
     label: str,
     base_name: str,
@@ -142,23 +174,51 @@ def _run_level(
     idx: int,
     *,
     fixed_gap_m: float | None,
+    cfl_safety: float | None = None,
+    file_suffix: str = "",
+    run_fdtd: bool = True,
 ) -> dict[str, Any]:
     gap_cells: int | None = None
     if fixed_gap_m is not None:
         gap_cells = round(fixed_gap_m / h)
-    cfg = _h_cfg(cfg_base, h, gap_cells=gap_cells)
+    cfg = _h_cfg(cfg_base, h, gap_cells=gap_cells, cfl_safety=cfl_safety)
     meta = _run_meta(cfg)
-    reuse_default_h1 = (
-        fixed_gap_m is not None
-        and idx == 1
-        and meta["gap_cells"] == DEFAULT_GAP_CELLS
+    gc = gap_cells if gap_cells is not None else (
+        cfg.numerics.gap_cells if cfg.numerics.gap_cells is not None else DEFAULT_GAP_CELLS
     )
-    suffix = ""
-    if fixed_gap_m is not None and not reuse_default_h1:
-        suffix = "_g"
-    out = _OUT / f"{base_name}_h{idx}{suffix}.h5"
-    _ensure_run(f"{label} h{idx}", cfg, out)
+    h5_name, reuse_default_h1 = _level_h5_name(
+        base_name, idx, fixed_gap_m=fixed_gap_m, gap_cells=int(gc), file_suffix=file_suffix
+    )
+    out = _OUT / h5_name
+    if run_fdtd:
+        _ensure_run(f"{label} h{idx}", cfg, out)
+        if base_name == "s4" and cfl_safety is not None:
+            est = dry_run_geom(cfg)
+            print(
+                f"  {label} h{idx}: cfl_safety_resolved={est['cfl_safety_resolved']}  "
+                f"cfl_safety_source={est['cfl_safety_source']}  "
+                f"delta_eq/h={est.get('delta_eq_over_h', float('nan')):.4g}  "
+                f"n_floored={est.get('n_floored', 0)}"
+            )
     return {"h5": out, "h_m": h, "cfg": cfg, "meta": meta, "reused_h1_default": reuse_default_h1}
+
+
+def _s3p_level_refs(
+    cfg_s3p: Config,
+    fixed_gap_m: float | None,
+) -> list[dict[str, Any]]:
+    return [
+        _run_level(
+            "s3p",
+            "s3p",
+            cfg_s3p,
+            h,
+            i,
+            fixed_gap_m=fixed_gap_m,
+            run_fdtd=False,
+        )
+        for i, h in enumerate(_H_LEVELS, 1)
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -170,8 +230,22 @@ def main(argv: list[str] | None = None) -> int:
         metavar="X",
         help="Fix physical air gap (m): set numerics.gap_cells=round(X/h) per level",
     )
+    parser.add_argument(
+        "--cfl",
+        type=float,
+        default=None,
+        metavar="X",
+        help="Set numerics.cfl_safety=X on S4 runs only; write s4_h{i}_cflX.h5",
+    )
+    parser.add_argument(
+        "--s4-only",
+        action="store_true",
+        help="Skip s3p FDTD (reuse existing s3p_h*.h5)",
+    )
     args = parser.parse_args(argv)
     fixed_gap_m = args.fixed_gap_m
+    cfl_s4 = args.cfl
+    s4_file_suffix = _cfl_suffix(cfl_s4) if cfl_s4 is not None else ""
 
     t0 = time.perf_counter()
     _OUT.mkdir(parents=True, exist_ok=True)
@@ -179,23 +253,52 @@ def main(argv: list[str] | None = None) -> int:
     cfg_s3p = _load_json(_SHOWCASE / "s3p_c09_parametric.json")
     cfg_s4 = _load_json(_SHOWCASE / "s4_tilted.json")
 
-    print("C18(i) dry-run summary (all six levels):")
+    n_dry = 3 if args.s4_only else 6
+    print(f"C18(i) dry-run summary ({n_dry} levels):")
     for i, h in enumerate(_H_LEVELS, start=1):
         for nm, cfg in (("s3p", cfg_s3p), ("s4", cfg_s4)):
+            if args.s4_only and nm == "s3p":
+                continue
             gap_cells = round(fixed_gap_m / h) if fixed_gap_m is not None else None
-            est = dry_run_geom(_h_cfg(cfg, h, gap_cells=gap_cells))
+            cfl = cfl_s4 if nm == "s4" else None
+            est = dry_run_geom(_h_cfg(cfg, h, gap_cells=gap_cells, cfl_safety=cfl))
             ncell = int(np.prod(est["grid_shape"]))
+            extra = ""
+            if nm == "s4" and cfl is not None:
+                extra = (
+                    f"  cfl_resolved={est['cfl_safety_resolved']}  "
+                    f"cfl_source={est['cfl_safety_source']}  "
+                    f"delta_eq/h={est.get('delta_eq_over_h', 0.0):.4g}"
+                )
             print(
                 f"  {nm} h{i}: cells={ncell}  h={h * 1e3:.4g} mm  "
                 f"n_steps={est['n_steps']}  wall_est={est['wall_time_s_est']:.3g} s"
+                f"{extra}"
             )
 
-    s3p_runs = [
-        _run_level("s3p", "s3p", cfg_s3p, h, i, fixed_gap_m=fixed_gap_m)
-        for i, h in enumerate(_H_LEVELS, 1)
-    ]
+    if args.s4_only:
+        s3p_runs = _s3p_level_refs(cfg_s3p, fixed_gap_m)
+        for r in s3p_runs:
+            if not r["h5"].is_file():
+                raise FileNotFoundError(
+                    f"--s4-only: missing {r['h5']}; run without --s4-only first"
+                )
+    else:
+        s3p_runs = [
+            _run_level("s3p", "s3p", cfg_s3p, h, i, fixed_gap_m=fixed_gap_m)
+            for i, h in enumerate(_H_LEVELS, 1)
+        ]
     s4_runs = [
-        _run_level("S4", "s4", cfg_s4, h, i, fixed_gap_m=fixed_gap_m)
+        _run_level(
+            "S4",
+            "s4",
+            cfg_s4,
+            h,
+            i,
+            fixed_gap_m=fixed_gap_m,
+            cfl_safety=cfl_s4,
+            file_suffix=s4_file_suffix,
+        )
         for i, h in enumerate(_H_LEVELS, 1)
     ]
     if fixed_gap_m is not None:

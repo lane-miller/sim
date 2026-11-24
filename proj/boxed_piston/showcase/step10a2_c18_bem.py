@@ -58,12 +58,16 @@ _EDGE_REACTANCE_NOTE = (
     "radiator-edge reactance excess ≈1.5–2.6% at 10–12 cells across the short "
     "side, decreasing with resolution (C9)"
 )
-_FDTD_KEYS = (
-    ("s3p_h1", "s3p_h1.h5"),
-    ("s3p_h3", "s3p_h3.h5"),
-    ("S4_h1", "s4_h1.h5"),
-    ("S4_h3", "s4_h3.h5"),
-)
+_A11_DIM_CORR = -0.0044
+
+
+def _fdtd_keys(s4_suffix: str) -> tuple[tuple[str, str], ...]:
+    return (
+        ("s3p_h1", "s3p_h1.h5"),
+        ("s3p_h3", "s3p_h3.h5"),
+        ("S4_h1", f"s4_h1{s4_suffix}.h5"),
+        ("S4_h3", f"s4_h3{s4_suffix}.h5"),
+    )
 
 
 def _load_c09_geometry() -> dict[str, Any]:
@@ -137,6 +141,7 @@ def _solve_bem_f(
     mesh_cache: BoxMeshCache,
     sol_cache: dict[tuple[float, float, int], NeumannBmResult],
     reuse_cache: bool,
+    cache_only: bool = False,
 ) -> NeumannBmResult:
     f_key = float(f_hz)
     cache_key = (f_key, float(epw), int(rad_div))
@@ -150,6 +155,10 @@ def _solve_bem_f(
     h_rad = min(rw, rh) / float(rad_div)
     h_tgt = h_target_from_frequency(f_key, c, epw=epw, h_max=_BEM_H_MAX)
     path = c09_bem_cache_path(_BEM_CACHE, geo, epw=epw, f_hz=f_key)
+    if cache_only and not path.is_file():
+        raise FileNotFoundError(
+            f"BEM cache missing {path}; run step10a2 once without --s4-suffix to populate"
+        )
     if reuse_cache and path.is_file():
         try:
             cached = load_c09_bem_cache(path)
@@ -165,6 +174,11 @@ def _solve_bem_f(
                 return sol
         except ValueError:
             pass
+    if cache_only:
+        raise FileNotFoundError(
+            f"BEM cache unreadable or incomplete {path}; "
+            "run step10a2 once without --s4-suffix to populate"
+        )
     grid = mesh_cache.get(W, H, D, rad_rect, origin, h_tgt, h_rad=h_rad)
     k = 2.0 * math.pi * f_key / c
     sol = solve_neumann_bm(grid, k, vn_P0=1.0, rho=rho, c=c, log_dof=False)
@@ -284,7 +298,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Report-only: radiator h_rad convergence at 300 and 1000 Hz",
     )
+    parser.add_argument(
+        "--s4-suffix",
+        default="",
+        metavar="SUFFIX",
+        help='Load s4_h1{SUFFIX}.h5 / s4_h3{SUFFIX}.h5; write c18_bem{SUFFIX}.json/.png',
+    )
     args = parser.parse_args(argv)
+    s4_suffix = str(args.s4_suffix)
+    fdtd_keys = _fdtd_keys(s4_suffix)
+    bem_cache_only = bool(s4_suffix)
+    out_stem = f"c18_bem{s4_suffix}"
     t0 = time.perf_counter()
     _OUT.mkdir(parents=True, exist_ok=True)
     _BEM_CACHE.mkdir(parents=True, exist_ok=True)
@@ -302,12 +326,15 @@ def main(argv: list[str] | None = None) -> int:
         rad_div=_BEM_RAD_DIV,
     )
 
-    for key, name in _FDTD_KEYS:
+    for key, name in fdtd_keys:
         h5 = _STEP10A / name
         if not h5.is_file():
-            raise FileNotFoundError(
-                f"Missing FDTD HDF5 {h5}; run showcase/step10a_c18.py first"
+            hint = (
+                f" showcase/step10a_c18.py --cfl … --s4-only"
+                if s4_suffix
+                else " showcase/step10a_c18.py first"
             )
+            raise FileNotFoundError(f"Missing FDTD HDF5 {h5}; run{hint}")
 
     freqs = np.asarray(_FREQS_HZ, dtype=_F64)
     n_f = freqs.size
@@ -331,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
                 mesh_cache=mesh_cache,
                 sol_cache=sol_cache,
                 reuse_cache=True,
+                cache_only=bem_cache_only,
             )
             bem_z[float(f_hz)] = _z_bem_cached(
                 float(f_hz), epw=_BEM_EPW, geo=geo_bem, sol=sol
@@ -386,6 +414,7 @@ def main(argv: list[str] | None = None) -> int:
                 mesh_cache=mesh_cache,
                 sol_cache=sol_cache,
                 reuse_cache=True,
+                cache_only=bem_cache_only,
             )
             z18 = _z_bem_cached(float(f_hz), epw=_BEM_EPW_REFINE, geo=geo18, sol=sol18)
             rel = abs(z12 - z18) / max(abs(z18), 1e-30)
@@ -411,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             "H_bem_mag": float(abs(H_b)),
             "per_fdtd": {},
         }
-        for tag, hname in _FDTD_KEYS:
+        for tag, hname in fdtd_keys:
             with Result(_STEP10A / hname, frame="local") as res:
                 _, z_arr = res.z(f_key)
                 H_arr = res.field(_FAR_PT, f_key, frame="local") / (rho * c)
@@ -435,15 +464,20 @@ def main(argv: list[str] | None = None) -> int:
     for row in rows:
         f_key = float(row["f_hz"])
         print(f"  f={f_key:.0f} Hz  z_bem={row['z_bem_real']:+.5f}{row['z_bem_imag']:+.5f}j", flush=True)
-        for tag, _ in _FDTD_KEYS:
+        for tag, _ in fdtd_keys:
             d = row["per_fdtd"][tag]
-            print(
+            line = (
                 f"    {tag}: ez={d['ez']:.4g}  "
                 f"dRe/|zb|={d['dRe_rel']:+.4g}  dIm/|zb|={d['dIm_rel']:+.4g}  "
-                f"on-axis={d['on_axis_db']:+.3f} dB  "
-                f"phase={d['on_axis_phase_deg']:+.2f} deg",
-                flush=True,
             )
+            if tag.startswith("S4"):
+                d_im_corr = float(d["dIm_rel"]) + _A11_DIM_CORR
+                line += f"dIm_corr={d_im_corr:+.4g}  "
+            line += (
+                f"on-axis={d['on_axis_db']:+.3f} dB  "
+                f"phase={d['on_axis_phase_deg']:+.2f} deg"
+            )
+            print(line, flush=True)
 
     bem_radiator_refinement: dict[str, Any] | None = None
     if args.bem_refine:
@@ -516,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
     ax.plot(f_plot, zr, "ko", mfc="none", ms=7, label="BEM Re")
     ax.plot(f_plot, zi, "k^", mfc="none", ms=6, label="BEM Im")
     styles = {"s3p_h1": "-", "s3p_h3": "--", "S4_h1": "-.", "S4_h3": ":"}
-    for tag, hname in _FDTD_KEYS:
+    for tag, hname in fdtd_keys:
         with Result(_STEP10A / hname, frame="local") as res:
             _, z_tab = res.z(f_plot)
             z_sel = np.asarray(z_tab, dtype=_C128).ravel()
@@ -529,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
     ax.set_title("Re/Im z: BEM vs FDTD")
 
     ax = axes[1]
-    for tag, _ in _FDTD_KEYS:
+    for tag, _ in fdtd_keys:
         ez = [float(r["per_fdtd"][tag]["ez"]) for r in rows]
         ax.semilogy(f_plot, ez, "o-", label=tag)
     ax.set_xlabel("f (Hz)")
@@ -538,7 +572,7 @@ def main(argv: list[str] | None = None) -> int:
     ax.set_title(r"$e_z = |z_{\mathrm{fd}}-z_{\mathrm{bem}}|/|z_{\mathrm{bem}}|$")
 
     ax = axes[2]
-    for tag, _ in _FDTD_KEYS:
+    for tag, _ in fdtd_keys:
         db = [float(r["per_fdtd"][tag]["on_axis_db"]) for r in rows]
         ax.plot(f_plot, db, "o-", label=tag)
     ax.axhline(_GATE_FF_DB, color="gray", ls=":", lw=0.8)
@@ -549,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
     ax.set_title("On-axis transfer ratio (dB)")
 
     fig.tight_layout()
-    png_path = _OUT / "c18_bem.png"
+    png_path = _OUT / f"{out_stem}.png"
     fig.savefig(png_path, dpi=140)
     plt.close(fig)
 
@@ -576,9 +610,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     if bem_radiator_refinement is not None:
         payload["bem_radiator_refinement"] = bem_radiator_refinement
-    json_path = _OUT / "c18_bem.json"
+    json_path = _OUT / f"{out_stem}.json"
     merged = payload
-    if json_path.is_file():
+    if not s4_suffix and json_path.is_file():
         try:
             prior = json.loads(json_path.read_text(encoding="utf-8"))
             if isinstance(prior, dict):
