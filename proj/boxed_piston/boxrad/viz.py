@@ -507,9 +507,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--huygens", action="store_true", help="Overlay Huygens patch centers")
     parser.add_argument("--face", action="store_true", help="Show only the front-face mesh panel")
+    parser.add_argument(
+        "--geometry",
+        action="store_true",
+        help="Parametric voxel/mesh view from JSON config (no HDF5 required)",
+    )
+    parser.add_argument(
+        "--slice",
+        type=str,
+        default=None,
+        help="Slice point x,y,z in meters (default: radiator 0 / test source / bbox center)",
+    )
+    parser.add_argument(
+        "--h",
+        type=float,
+        default=None,
+        dest="h_override",
+        help="Override numerics.h_override for a quick coarse/fine look",
+    )
     args = parser.parse_args(argv)
     show = not args.no_show
-    if args.face:
+    if args.geometry:
+        from boxrad.plot.geometry import _parse_slice, plot_geometry_from_config
+
+        slice_xyz = _parse_slice(args.slice)
+        plot_geometry_from_config(
+            args.config_or_h5,
+            out=args.output,
+            slice_xyz=slice_xyz,
+            h_override=args.h_override,
+            show=show,
+        )
+    elif args.face:
         plot_face_mesh(args.config_or_h5, out=args.output, show=show)
     else:
         plot_geometry(

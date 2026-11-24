@@ -362,10 +362,9 @@ def run(
     cfg_source = cfg
     config = _load_config(cfg)
 
-    if config.geometry == "parametric":
+    if config.geometry in ("parametric", "step"):
         from boxrad.config import test_source_active
         from boxrad.geomrun import (
-            dry_run_geom,
             multirad_output_path,
             prepare_geom_run,
             resolve_drive_indices,
@@ -375,24 +374,19 @@ def run(
         dest = _resolve_out_path(config, cfg_source, Path(out_path) if out_path else None)
 
         if dry_run:
+            from boxrad.geomrun import dry_run_geom
+            from boxrad.report import format_geom_report, geom_report
+
+            cfg_path = Path(cfg_source) if isinstance(cfg_source, (str, Path)) else None
             summary = dry_run_geom(config, out_path=dest)
-            _print_dry_run_summary(summary)
-            if "n_runs" in summary:
-                print(f"  n_runs: {summary['n_runs']}")
-                print(
-                    f"  wall_time_s_est_per_run: "
-                    f"{_sigfig4(summary['wall_time_s_est_per_run'])} s"
-                )
-                print(f"  wall_time_s_est_total: {_sigfig4(summary['wall_time_s_est_total'])} s")
-                print(
-                    f"  output_bytes_est_per_run: "
-                    f"{_sigfig4(summary['output_bytes_est_per_run'] / 1e6)} MB (approx.)"
-                )
-                print(
-                    f"  output_bytes_est_total: "
-                    f"{_sigfig4(summary['output_bytes_est_total'] / 1e6)} MB (approx.)"
-                )
-                print(f"  planned_output_files: {summary['planned_output_files']}")
+            report = geom_report(
+                config,
+                out_path=dest,
+                cfg_path=cfg_path,
+                ram_limit_bytes=ram_limit_bytes,
+            )
+            summary["report"] = report
+            print(format_geom_report(report), end="")
             return summary
 
         from boxrad.geom.geometry import build_geometry
@@ -684,6 +678,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Dry run only: print summary without opening the geometry window",
     )
+    parser.add_argument(
+        "--json",
+        type=Path,
+        default=None,
+        help="Parametric dry run: write geom_report dict to this JSON path",
+    )
     args = parser.parse_args(argv)
 
     result: Path | dict[str, Any] | None = None
@@ -709,7 +709,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if isinstance(result, dict):
-        pass
+        if args.dry_run and args.json is not None:
+            import json
+
+            from validation._common import to_json_safe
+
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            json_payload = result.get("report", result)
+            args.json.write_text(
+                json.dumps(to_json_safe(json_payload), indent=2),
+                encoding="utf-8",
+            )
+            print(f"wrote {args.json}")
+        if args.dry_run and isinstance(cfg_source := args.config, Path):
+            try:
+                loaded = _load_config(args.config)
+            except Exception:
+                loaded = None
+            if loaded is not None and loaded.geometry in ("parametric", "step"):
+                from boxrad.report import geom_report_exit_code
+
+                code = geom_report_exit_code(result.get("report", result))
+                if code != 0:
+                    return code
     elif result is not None:
         out_p = Path(result)
         if out_p.is_file():
