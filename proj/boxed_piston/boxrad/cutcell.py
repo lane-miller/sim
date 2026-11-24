@@ -1,5 +1,9 @@
 """Cut-cell volume and face fractions (v0.3 step 4).
 
+Wall patch area vectors ``N_c`` accumulate ``Σ A n̂`` with ``n̂`` the triangle
+unit normal from the cross product (solid outward into fluid), matching
+``tests.ref_cutcell``.
+
 Kernel index conventions (match ``boxrad.grid`` Yee layout):
 
 * ``beta[i, j, k]`` — fluid volume fraction at cell center of cell ``(i, j, k)``.
@@ -1022,6 +1026,38 @@ def _natural_grid_for_box(geometry: Geometry, cfg, h: float) -> Grid:
     return g
 
 
+def wetted_wall_arrays(
+    fractions: Fractions,
+    beta_tilde: np.ndarray,
+    h: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Wall patches with ``β̃ > 0`` after floor (compact; same order as ``patch_*``)."""
+    bt = np.asarray(beta_tilde, dtype=_F64).reshape(-1)
+    area_min = 1e-12 * float(h) * float(h)
+    n_patch = int(fractions.patch_cell.shape[0])
+    if n_patch == 0:
+        z0 = np.zeros(0, dtype=_F64)
+        z1 = np.zeros((0, 3), dtype=_F64)
+        z2 = np.zeros(0, dtype=_I64)
+        return z2, z0, z1, z1
+    keep = [
+        idx
+        for idx in range(n_patch)
+        if fractions.patch_A[idx] > area_min and bt[int(fractions.patch_cell[idx])] > 0.0
+    ]
+    if not keep:
+        z0 = np.zeros(0, dtype=_F64)
+        z1 = np.zeros((0, 3), dtype=_F64)
+        z2 = np.zeros(0, dtype=_I64)
+        return z2, z0, z1, z1
+    ki = np.asarray(keep, dtype=_I64)
+    areas = fractions.patch_A[ki].astype(_F64, copy=False)
+    centroids = fractions.patch_centroid[ki].astype(_F64, copy=False)
+    area_vec = (fractions.patch_normal[ki] * areas[:, np.newaxis]).astype(_F64, copy=False)
+    cells = fractions.patch_cell[ki].astype(_I64, copy=False)
+    return cells, areas, centroids, area_vec
+
+
 def compute_fractions(geometry: Geometry | None, grid: Grid) -> Fractions:
     if geometry is None:
         raise ValueError("baffle geometry is not supported for compute_fractions")
@@ -1154,7 +1190,8 @@ def compute_fractions(geometry: Geometry | None, grid: Grid) -> Fractions:
     target_vol = mesh_vol + voids_removed_volume
     rel_vol_err = abs(fluid_vol - target_vol) / max(abs(target_vol), 1e-30)
     rel_vol_err_raw = abs(fluid_vol - mesh_vol) / max(abs(mesh_vol), 1e-30)
-    patch_mask = A_c > 0.0
+    area_eps = 1e-12 * grid.h * grid.h
+    patch_mask = A_c > area_eps
     patch_cell = np.where(patch_mask)[0].astype(_I64)
     patch_A = A_c[patch_mask].astype(_F64)
     patch_centroid = np.zeros((patch_cell.shape[0], 3), dtype=_F64)

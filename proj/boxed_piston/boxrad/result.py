@@ -659,6 +659,111 @@ class Result:
     def _radiator_v_at_f(self, f_hz: float) -> complex:
         return self._huygens_at_f(f_hz)[1]
 
+    def _surface_kind(self) -> str:
+        m = self.meta.get("surface_kind")
+        if m not in (None, ""):
+            return str(m)
+        f = self._file()
+        if "surface" in f and "surface_kind" in f["surface"].attrs:
+            return str(f["surface"].attrs["surface_kind"])
+        if "box_surface" in f:
+            return "box_faces"
+        return "none"
+
+    def _surface_transfer_table(self) -> tuple[np.ndarray, np.ndarray]:
+        f_h5 = self._file()
+        if "surface" not in f_h5 or "p" not in f_h5["surface"]:
+            raise ValueError("HDF5 has no finalized surface/p dataset")
+        dset = f_h5["surface/p"]
+        f_tab = np.asarray(dset.attrs["f"], dtype=_F64).ravel()
+        p_tab = np.asarray(dset[()], dtype=_C128)
+        return f_tab, p_tab
+
+    def _surface_at_frequencies(self, f_arr: np.ndarray) -> np.ndarray:
+        f_tab, p_tab = self._surface_transfer_table()
+        out = np.zeros((f_arr.size, p_tab.shape[1]), dtype=_C128)
+        for i, f_hz in enumerate(f_arr):
+            j = int(np.argmin(np.abs(f_tab - float(f_hz))))
+            if abs(f_tab[j] - float(f_hz)) > max(1e-6 * abs(f_hz), 1e-9):
+                raise ValueError(
+                    f"surface/p table has no entry near f={float(f_hz):.6g} Hz "
+                    f"(nearest {f_tab[j]:.6g} Hz)"
+                )
+            out[i] = p_tab[j]
+        return out
+
+    def surface_points(
+        self,
+        *,
+        frame: Literal["local", "world"] | None = None,
+    ) -> np.ndarray:
+        """Wetted-wall patch centroids ``(n_wet, 3)`` in the chosen frame (wall patches only)."""
+        frame_sel = self._resolve_frame(frame)
+        f_h5 = self._file()
+        kind = self._surface_kind()
+        if kind == "wall_patches":
+            pts = np.asarray(f_h5["surface/points"][()], dtype=_F64)
+        elif kind == "box_faces":
+            pts = np.asarray(f_h5["box_surface/centers"][()], dtype=_F64)
+        else:
+            raise ValueError("no surface geometry in this file")
+        if frame_sel == "local":
+            r_mat, t = self.pose
+            pts = (pts - t) @ r_mat
+        return pts
+
+    def surface_normals(
+        self,
+        *,
+        frame: Literal["local", "world"] | None = None,
+    ) -> np.ndarray:
+        """Outward unit normals ``(n_wet, 3)`` (rotate with ``frame``; areas are invariant)."""
+        frame_sel = self._resolve_frame(frame)
+        f_h5 = self._file()
+        kind = self._surface_kind()
+        if kind == "wall_patches":
+            n_hat = np.asarray(f_h5["surface/normals"][()], dtype=_F64)
+        elif kind == "box_faces":
+            n_hat = np.asarray(f_h5["box_surface/normals"][()], dtype=_F64)
+        else:
+            raise NotImplementedError("surface normals/areas not stored for this file")
+        if frame_sel == "local":
+            r_mat, _ = self.pose
+            n_hat = n_hat @ r_mat
+        return n_hat
+
+    def surface_areas(self) -> np.ndarray:
+        """Wetted patch areas ``(n_wet,)`` [m²] (frame-invariant)."""
+        f_h5 = self._file()
+        kind = self._surface_kind()
+        if kind == "wall_patches":
+            return np.asarray(f_h5["surface/areas"][()], dtype=_F64)
+        if kind == "box_faces":
+            return np.asarray(f_h5["box_surface/areas"][()], dtype=_F64)
+        raise NotImplementedError("surface normals/areas not stored for this file")
+
+    def surface_area_vectors(
+        self,
+        *,
+        frame: Literal["local", "world"] | None = None,
+    ) -> np.ndarray:
+        """Area vectors ``N_w = A n̂`` outward from solid into fluid ``(n_wet, 3)``."""
+        frame_sel = self._resolve_frame(frame)
+        f_h5 = self._file()
+        kind = self._surface_kind()
+        if kind == "wall_patches":
+            n_w = np.asarray(f_h5["surface/area_vectors"][()], dtype=_F64)
+        elif kind == "box_faces":
+            areas = np.asarray(f_h5["box_surface/areas"][()], dtype=_F64)
+            n_hat = np.asarray(f_h5["box_surface/normals"][()], dtype=_F64)
+            n_w = n_hat * areas[:, np.newaxis]
+        else:
+            raise ValueError("no surface geometry in this file")
+        if frame_sel == "local":
+            r_mat, _ = self.pose
+            n_w = n_w @ r_mat
+        return n_w
+
     def _image_plane_z(self) -> float | None:
         if self.config.geometry == "baffle":
             return 0.0
@@ -945,33 +1050,45 @@ class Result:
 
     def surface_p(
         self,
-        points: np.ndarray | list,
-        f: np.ndarray | float,
+        points_or_f: np.ndarray | list | float,
+        f: np.ndarray | float | None = None,
         *,
         allow_out_of_band: bool = False,
     ) -> np.ndarray:
-        """Pressure transfer ``H = p/v`` on the rigid box surface (box mode only).
+        """Surface pressure transfer on stored patches.
 
-        Each point maps to the nearest stored ``h × h`` box-surface patch (no
-        interpolation). Rigid patches carry the adjacent cell-center pressure
-        (``h/2`` outside the face); radiator patches add the ``(h/2)ρ ∂v/∂t``
-        face correction. Pressure is singular at box edges and the radiator rim.
+        **Wall patches** (``surface_kind = wall_patches``): call ``surface_p(f)``
+        with a single frequency argument; returns complex ``(n_f, n_wet)`` in
+        Pa/(m³/s) for a test source or Pa/(m/s) per unit radiator velocity.
+
+        **Box faces** (legacy): call ``surface_p(points, f)``; each point maps to
+        the nearest stored ``h × h`` patch. Net force on the body uses
+        ``F = −Σ_w p_w N_w`` with ``N_w`` (``surface_area_vectors``) pointing from
+        solid into fluid.
 
         Args:
-            points: ``(n_pts, 3)`` or ``(3,)`` coordinates in m on or near the box.
-            f: Frequencies in Hz (scalar or array-like) inside :attr:`band`.
+            points_or_f: For wall patches, frequencies in Hz. For box mode,
+                ``(n_pts, 3)`` patch lookup coordinates [m].
+            f: Frequencies (box mode only).
             allow_out_of_band: Warn instead of raising for out-of-band ``f``.
 
         Returns:
-            Complex128 ``(n_f, n_pts)`` in Pa/(m/s).
+            Complex128 ``(n_f, n_pts)`` or ``(n_f, n_wet)``.
 
         Raises:
-            ValueError: Out-of-band ``f`` without ``allow_out_of_band``; the file
-                has no ``box_surface`` group (baffle mode); or a point is more than
-                ``h`` from the plane of its nearest patch.
+            ValueError: Out-of-band ``f``; missing surface data; or box point too
+                far from the nearest patch plane.
         """
+        kind = self._surface_kind()
+        if kind == "wall_patches":
+            if f is not None:
+                raise ValueError("wall_patches surface_p(f): do not pass points as second argument")
+            f_arr = self._check_f(points_or_f, allow_out_of_band)
+            return self._surface_at_frequencies(f_arr)
+        if f is None:
+            raise TypeError("box surface_p requires (points, f)")
         f_arr = self._check_f(f, allow_out_of_band)
-        pts = np.atleast_2d(np.asarray(points, dtype=_F64))
+        pts = np.atleast_2d(np.asarray(points_or_f, dtype=_F64))
         h = float(self.derived.h)
         out = np.zeros((f_arr.size, pts.shape[0]), dtype=_C128)
         f_h5 = self._file()

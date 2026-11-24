@@ -133,6 +133,7 @@ class Output:
     path: str = ""
     probes: list[list[float]] | None = None  # each [x, y, z] in meters
     probes_baffle_z_cells: list[int] | None = None  # baffle: z = (k + ½) h on radiator axis
+    surface_p: bool = True  # record wetted-wall surface pressure (parametric) / box faces (legacy)
 
 
 @dataclass

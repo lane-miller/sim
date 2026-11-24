@@ -88,3 +88,36 @@ def sphere_point_source(
         pin *= -1j * k / (4 * np.pi) * pre
         psc *= 1j * k / (4 * np.pi) * pre
         return {"inc": pin, "scat": psc, "total": pin + psc}[part]
+
+
+def sphere_surface_moments(
+    f: float,
+    a: float,
+    r0: float,
+    rho: float,
+    c: float,
+) -> tuple[complex, complex]:
+    """Mean surface pressure ``c₀`` and axial force ``F`` for unit monopole ``Q`` (e^{+jωt}).
+
+    ``⟨p⟩ = c₀`` on the rigid sphere of radius ``a``. Force on the sphere along the
+    axis from the center toward the source at distance ``r₀`` is
+    ``F = −(4π a²/3) c₁`` (series moments of :func:`sphere_point_source` at ``r = a``).
+    """
+    w = 2.0 * np.pi * float(f)
+    k = w / float(c)
+    ka = k * float(a)
+    kr0 = k * float(r0)
+
+    def cn_over_q(n: int) -> complex:
+        hp = _h2(n, kr0)
+        hpd = _h2(n, ka, d=True)
+        num = 1j * w * float(rho) * (2 * n + 1) * (-k * hp)
+        den = 4.0 * np.pi * (ka * ka) * hpd
+        if abs(den) < 1e-300:
+            return 0.0 + 0j
+        return complex(num / den)
+
+    c0 = cn_over_q(0)
+    c1 = cn_over_q(1)
+    force = -(4.0 * np.pi * float(a) ** 2 / 3.0) * c1
+    return c0, force

@@ -89,11 +89,17 @@ def h_transfer_err(h_ref: complex, h: complex) -> tuple[float, float]:
     return db, ph
 
 
-def load_radiator_velocity_spectrum(path: Path, derived: object, f_hz: float) -> complex:
+def load_radiator_velocity_spectrum(source: str | Path | Any, derived: object, f_hz: float) -> complex:
     """Radiator velocity spectrum ``V(f)`` at pressure sample times."""
     import h5py
 
-    with h5py.File(path, "r") as f:
+    owned = False
+    if isinstance(source, h5py.File):
+        f = source
+    else:
+        f = h5py.File(Path(source), "r")
+        owned = True
+    try:
         t_rad = np.asarray(f["radiator/times_p"][()], dtype=_F64)
         v_rad = np.array(
             [
@@ -102,6 +108,9 @@ def load_radiator_velocity_spectrum(path: Path, derived: object, f_hz: float) ->
             ],
             dtype=_F64,
         )
+    finally:
+        if owned:
+            f.close()
     return complex(spectrum(v_rad, t_rad, f_hz))
 
 

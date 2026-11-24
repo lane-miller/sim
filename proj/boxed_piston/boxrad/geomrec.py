@@ -14,7 +14,13 @@ from boxrad.config import Config, Derived, test_source_active
 from boxrad.geom.geometry import Geometry
 from boxrad.geomderive import GeomGrid
 from boxrad.grid import Fields
-from boxrad.post.finalize import compute_finalize_results, write_finalize_meta
+from boxrad.cutcell import wetted_wall_arrays
+from boxrad.post.finalize import (
+    compute_finalize_results,
+    write_finalize_meta,
+    write_surface_transfer,
+)
+from boxrad.post.zrad import log_frequency_grid
 from boxrad.post.zrow import write_zrad_row_dataset, zrad_row_at_frequencies
 from boxrad.post.kirchhoff import SurfacePatches, huygens_box_patches
 from boxrad.recorder import (
@@ -448,6 +454,14 @@ class GeomRecorder:
             self._rad_w_sum = self._all_w_sum[driven]
             self._rad_d = self._all_d[driven]
 
+        self._record_surface = bool(cfg.output.surface_p)
+        cells_w, areas_w, cents_w, avec_w = wetted_wall_arrays(fractions, beta_tilde, h)
+        self._n_wet = int(cells_w.shape[0])
+        self._sf_p_idx = cells_w.astype(np.int64) if self._record_surface else np.empty(0, dtype=np.int64)
+        self._sf_areas = areas_w
+        self._sf_centroids = cents_w
+        self._sf_area_vec = avec_w
+
         probe_targets = self._resolve_probe_targets(cfg)
         self._n_probes = len(probe_targets)
         self._probe_requested = (
@@ -628,6 +642,22 @@ class GeomRecorder:
             pr.create_dataset("requested", data=self._probe_requested, compression="gzip")
             pr.create_dataset("centers", data=self._probe_centers, compression="gzip")
 
+        if self._record_surface and self._n_wet > 0:
+            surf = self._file.create_group("surface")
+            surf.attrs["surface_kind"] = "wall_patches"
+            surf.attrs["n_wet"] = int(self._n_wet)
+            surf.create_dataset("points", data=self._sf_centroids.astype(_F64), compression="gzip")
+            avec = self._sf_area_vec.astype(_F64)
+            areas = self._sf_areas.astype(_F64)
+            norms = avec / np.linalg.norm(avec, axis=1, keepdims=True)
+            surf.create_dataset("normals", data=norms, compression="gzip")
+            surf.create_dataset("areas", data=areas, compression="gzip")
+            surf.create_dataset("area_vectors", data=avec, compression="gzip")
+            surf.attrs["p_times"] = "t_p = (n+1)Δt at decimated steps n ≡ 0 (mod M)"
+            meta.attrs["surface_kind"] = "wall_patches"
+        elif not self._record_surface:
+            meta.attrs["surface_kind"] = "none"
+
         meta.attrs["time_after_step_n"] = (
             "sample() is called after step_geom(n); fields.p is p^{n+1}, staggered v is v^{n+½}"
         )
@@ -691,6 +721,19 @@ class GeomRecorder:
         else:
             self._ds_pr_p = None
             self._ds_pr_tp = None
+
+        if self._record_surface and self._n_wet > 0:
+            surf = self._file["surface"]
+            nw = self._n_wet
+            self._ds_sf_p = self._create_extensible(surf, "p_raw", (nw,), _F32, buf)
+            self._ds_sf_tp = self._create_extensible(surf, "times_p", (), _F64, buf)
+            self._w_sf_p = _ChunkWriter(self._ds_sf_p, buf)
+            self._w_sf_tp = _ChunkWriter(self._ds_sf_tp, buf)
+        else:
+            self._ds_sf_p = None
+            self._ds_sf_tp = None
+            self._w_sf_p = None
+            self._w_sf_tp = None
 
         self._w_h_p = _ChunkWriter(self._ds_h_p, buf)
         self._w_h_vn = _ChunkWriter(self._ds_h_vn, buf)
@@ -774,6 +817,9 @@ class GeomRecorder:
             if self._w_pr_p is not None and self._w_pr_tp is not None:
                 self._w_pr_p.append(p_flat[self._probe_idx].astype(_F32))
                 self._w_pr_tp.append(t_p)
+            if self._w_sf_p is not None and self._w_sf_tp is not None:
+                self._w_sf_p.append(p_flat[self._sf_p_idx].astype(_F32))
+                self._w_sf_tp.append(t_p)
 
         self._step += 1
 
@@ -786,7 +832,7 @@ class GeomRecorder:
             self._w_h_vn,
             self._w_h_tp,
             self._w_h_tvn,
-            *(w for w in (self._w_pr_p, self._w_pr_tp) if w is not None),
+            *(w for w in (self._w_pr_p, self._w_pr_tp, self._w_sf_p, self._w_sf_tp) if w is not None),
         ]
         if not self._test_source_only:
             writers = [
@@ -818,6 +864,27 @@ class GeomRecorder:
             self._file.flush()
             self._file.close()
             self._file = None  # type: ignore[assignment]
+
+        f_log = log_frequency_grid(
+            float(self.cfg.band.f_min), float(self.derived.f_max), points_per_decade=100
+        )
+        if self._ds_sf_p is not None:
+            with h5.File(self._path, "r") as f_read:
+                if "surface" in f_read and "p_raw" in f_read["surface"]:
+                    p_sf = np.asarray(f_read["surface/p_raw"][()], dtype=_F64)
+                    t_sf = np.asarray(f_read["surface/times_p"][()], dtype=_F64)
+                else:
+                    p_sf = np.empty((0, 0), _F64)
+                    t_sf = np.empty(0, _F64)
+            with h5.File(self._path, "a") as f_append:
+                write_surface_transfer(
+                    f_append,
+                    self.cfg,
+                    self.derived,
+                    p_ts=p_sf,
+                    times_p=t_sf,
+                    f_log=f_log,
+                )
 
         if self._test_source_only:
             with h5.File(self._path, "a") as f_append:

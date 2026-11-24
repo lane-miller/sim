@@ -18,7 +18,7 @@ from boxrad.config import (
     resolve_parametric_cfl,
     test_source_active,
 )
-from boxrad.cutcell import Fractions, compute_fractions
+from boxrad.cutcell import Fractions, compute_fractions, wetted_wall_arrays
 from boxrad.cpml import make_cpml_state
 from boxrad.cutkernel import CutOperator, step_cut
 from boxrad.geom.geometry import Geometry, build_geometry, radiator_clearance
@@ -274,7 +274,18 @@ def dry_run_geom(cfg: Config, *, out_path: Path | None = None) -> dict[str, Any]
 
     n_runs = len(drive)
     per_wall = _estimate_wall_time_s(derived)
-    per_bytes = estimate_output_bytes(cfg, derived)
+    beta_tilde = cache.beta_tilde if cache is not None else info.get("beta_tilde")
+    n_wet = 0
+    if cfg.output.surface_p and beta_tilde is not None:
+        n_wet = int(wetted_wall_arrays(fractions, beta_tilde, derived.h)[0].size)
+    per_bytes = estimate_output_bytes(cfg, derived, n_wet=n_wet)
+    surface_extra_bytes = 0 if cfg.output.surface_p else 0
+    if not cfg.output.surface_p:
+        per_bytes_base = estimate_output_bytes(cfg, derived, n_wet=0)
+        surface_extra_bytes = 0
+    else:
+        per_bytes_base = estimate_output_bytes(cfg, derived, n_wet=0)
+        surface_extra_bytes = max(0, per_bytes - per_bytes_base)
     names = [r.name for r in geometry.radiators]
     n_rad = len(names)
     base = out_path or Path("out.h5")
@@ -323,6 +334,8 @@ def dry_run_geom(cfg: Config, *, out_path: Path | None = None) -> dict[str, Any]
         "wall_time_s_est_total": per_wall * n_runs,
         "output_bytes_est_per_run": per_bytes,
         "output_bytes_est_total": per_bytes * n_runs,
+        "n_wet": n_wet,
+        "surface_extra_bytes_est": surface_extra_bytes if cfg.output.surface_p else 0,
         "planned_output_files": planned,
         "drive_indices": drive,
         "run_files_json_preview": run_files,

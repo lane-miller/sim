@@ -619,6 +619,9 @@ class Recorder:
             ):
                 box.create_dataset(name, data=arr.astype(_F64), compression="gzip")
             box.attrs["p_times"] = "t_p = (n+1)·Δt, decimated n ≡ 0 (mod M)"
+            meta.attrs["surface_kind"] = "box_faces"
+        elif not self._is_baffle:
+            meta.attrs["surface_kind"] = "none"
         meta.attrs["geometry"] = self.cfg.geometry
         meta.attrs["time_after_step_n"] = (
             "sample() is called after step(n); fields.p is p^{n+1}, staggered v is v^{n+½}"

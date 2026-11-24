@@ -44,6 +44,7 @@ def fractions(verts, faces, x0, h, shape, plane_tol=1e-9):
     N = np.zeros(shape + (3,))       # sum A n
     M = np.zeros(shape)              # sum A (xbar - xc) . n
     Asum = np.zeros(shape)
+    Ssum = np.zeros(shape + (3,))    # sum A x̄ (world)
     area_check = []
     for f in faces:
         P = verts[f]
@@ -90,6 +91,7 @@ def fractions(verts, faces, x0, h, shape, plane_tol=1e-9):
                     N[idx] += A * n
                     M[idx] += A * np.dot(C - xc, n)
                     Asum[idx] += A
+                    Ssum[idx] += A * C
                     tot += A
         area_check.append(abs(tot - A_tri) / A_tri)
     # sweep
@@ -119,8 +121,26 @@ def fractions(verts, faces, x0, h, shape, plane_tol=1e-9):
         sl1[a] = slice(1, shape[a] + 1)
         sum_alpha += alpha[a][tuple(sl0)] + alpha[a][tuple(sl1)]
     beta = ((h / 2) * h**2 * sum_alpha - M) / (3 * h**3)
-    return dict(alpha=alpha, beta=beta, N=N, M=M, resid=resid,
-                max_area_err=max(area_check) if area_check else 0.0)
+    wall_area_eps = 1e-12 * h**2
+    wall_mask = Asum > wall_area_eps
+    flat_ids = np.flatnonzero(wall_mask.ravel())
+    wall_area = Asum.ravel()[flat_ids]
+    wall_area_vec = N.reshape(-1, 3)[flat_ids]
+    wall_centroid = (Ssum.reshape(-1, 3)[flat_ids] / wall_area[:, np.newaxis])
+    return dict(
+        alpha=alpha,
+        beta=beta,
+        N=N,
+        M=M,
+        Asum=Asum,
+        Ssum=Ssum,
+        resid=resid,
+        max_area_err=max(area_check) if area_check else 0.0,
+        wall_cell=flat_ids.astype(np.int64),
+        wall_area=wall_area,
+        wall_centroid=wall_centroid,
+        wall_area_vec=wall_area_vec,
+    )
 
 
 def box_mesh(lo, hi):
