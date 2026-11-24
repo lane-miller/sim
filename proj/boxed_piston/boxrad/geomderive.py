@@ -17,6 +17,7 @@ from boxrad.config import (
     Derived,
     _memory_bytes,
     _radiator_D,
+    provisional_geom_cfl,
     pulse_params,
     resolve_decimation,
     test_source_active,
@@ -178,7 +179,12 @@ def _cpml_slabs_for_planes(
     )
 
 
-def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
+def derive_geom(
+    cfg: Config,
+    geometry: Geometry,
+    *,
+    cfl_safety: float | None = None,
+) -> tuple[Derived, GeomGrid]:
     """Compute derived parameters and a :class:`GeomGrid` from solid bbox and radiator rules."""
     from boxrad.geomconfig import check_geometry_v03_guards
 
@@ -307,7 +313,8 @@ def derive_geom(cfg: Config, geometry: Geometry) -> tuple[Derived, GeomGrid]:
     total_cells = nx * ny * nz
     cell_budget_exceeded = total_cells > num.cell_budget
 
-    dt = num.cfl_safety * h / (c * SQRT3)
+    cfl = float(cfl_safety) if cfl_safety is not None else provisional_geom_cfl(num)
+    dt = cfl * h / (c * SQRT3)
     gap_m = gap_cells * h
     cpml_alpha = num.cpml_alpha_factor * math.pi * cfg.band.f_min
     memory_bytes = _memory_bytes(nx, ny, nz, cpml_cells)

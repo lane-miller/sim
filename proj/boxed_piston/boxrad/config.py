@@ -19,6 +19,8 @@ DEFAULT_CPML_CELLS = 16
 DEFAULT_GAP_CELLS = 10  # default margin over C3 gap pass at 5 cells (until box checks C9)
 DEFAULT_RAM_LIMIT_BYTES = 5 * 1024**3
 SQRT3 = math.sqrt(3.0)
+CFL_DEFAULT = 0.99
+CFL_CUTCELL = 0.7
 
 RadiatorShape = Literal["circle", "rect", "racetrack"]
 GeometryMode = Literal["box", "baffle", "parametric", "step"]
@@ -80,7 +82,7 @@ class Numerics:
     h_override: float | None = None  # fixed *h* (validation sweeps); skips ppw/radiator cap
     decimation_override: int | None = None  # Huygens/box decimation M (validation sweeps)
     cells_across_radiator: int = 10
-    cfl_safety: float = 0.99
+    cfl_safety: float | None = None
     gap_cells: int | None = None
     cpml_cells: int = DEFAULT_CPML_CELLS
     cpml_alpha_factor: float = 1.0
@@ -168,6 +170,9 @@ class Config:
         ts = d.get("numerics", {}).get("test_source")
         if ts is not None:
             d["numerics"]["test_source"] = {"position": list(ts["position"])}
+        num_out = d.get("numerics")
+        if num_out is not None and num_out.get("cfl_safety") is None:
+            num_out.pop("cfl_safety", None)
         extra = d.pop("geometry_sections", None)
         if extra:
             merged: dict[str, Any] = {}
@@ -267,6 +272,8 @@ class Derived:
     alias_level_db: float = float("nan")
     test_source_cell_center: tuple[float, float, float] | None = None
     test_source_cell_index: tuple[int, int, int] | None = None
+    cfl_safety_resolved: float = CFL_DEFAULT
+    cfl_safety_source: str = "default"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Derived:
@@ -283,7 +290,39 @@ class Derived:
         blob.setdefault("alias_level_db", float("nan"))
         blob.setdefault("test_source_cell_center", None)
         blob.setdefault("test_source_cell_index", None)
+        blob.setdefault("cfl_safety_resolved", CFL_DEFAULT)
+        blob.setdefault("cfl_safety_source", "default")
         return cls(**blob)
+
+
+def cfl_for_legacy_derive(num: Numerics) -> float:
+    """Box/baffle CFL for arithmetic (``None`` → :data:`CFL_DEFAULT`)."""
+    if num.cfl_safety is not None:
+        return float(num.cfl_safety)
+    return CFL_DEFAULT
+
+
+def resolve_legacy_cfl(num: Numerics) -> tuple[float, str]:
+    """Resolved CFL and source tag for box/baffle :func:`derive`."""
+    if num.cfl_safety is not None:
+        return float(num.cfl_safety), "user"
+    return CFL_DEFAULT, "default"
+
+
+def provisional_geom_cfl(num: Numerics) -> float:
+    """First-pass CFL for :func:`~boxrad.geomderive.derive_geom` before cut-cell auto."""
+    if num.cfl_safety is not None:
+        return float(num.cfl_safety)
+    return CFL_DEFAULT
+
+
+def resolve_parametric_cfl(num: Numerics, n_cut_cells: int) -> tuple[float, str]:
+    """Resolved CFL and source for parametric grids (after fractions)."""
+    if num.cfl_safety is not None:
+        return float(num.cfl_safety), "user"
+    if n_cut_cells > 0:
+        return CFL_CUTCELL, "auto_cutcell"
+    return CFL_DEFAULT, "default"
 
 
 CPML_SIDES_ALL = (True, True, True, True, True, True)
@@ -611,7 +650,8 @@ def derive(cfg: Config) -> Derived:
     nbx, nby, nbz, nx, ny, nz, rw, rh, rd = count_fn(h)
     total_cells = nx * ny * nz
     cell_budget_exceeded = total_cells > num.cell_budget
-    dt = num.cfl_safety * h / (c * SQRT3)
+    cfl, cfl_source = resolve_legacy_cfl(num)
+    dt = cfl * h / (c * SQRT3)
 
     radiator_ic = round(cfg.radiator.x_c / h)
     radiator_jc = round(cfg.radiator.y_c / h)
@@ -673,6 +713,8 @@ def derive(cfg: Config) -> Derived:
         cell_budget_exceeded=cell_budget_exceeded,
         decimation_m=decimation_m,
         alias_level_db=alias_level_db,
+        cfl_safety_resolved=cfl,
+        cfl_safety_source=cfl_source,
     )
 
 

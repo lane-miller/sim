@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from boxrad.config import Config, Derived, estimate_memory_bytes, test_source_active
+from boxrad.config import (
+    Config,
+    Derived,
+    estimate_memory_bytes,
+    provisional_geom_cfl,
+    resolve_parametric_cfl,
+    test_source_active,
+)
+from boxrad.cutcell import Fractions, compute_fractions
 from boxrad.cpml import make_cpml_state
 from boxrad.cutkernel import CutOperator, step_cut
 from boxrad.geom.geometry import Geometry, build_geometry, radiator_clearance
-from boxrad.geomderive import GeomGrid, derive_geom, validate_geom
+from boxrad.geomderive import GeomGrid, cut_grid, derive_geom, validate_geom
 from boxrad.geomop import (
     GeomOpCache,
     assert_test_source_cell_fluid,
@@ -83,6 +91,28 @@ def _test_source_injection(
     return flat, coeff, _F32(0.0)
 
 
+def _derive_geom_with_cfl_resolution(
+    cfg: Config,
+    geometry: Geometry,
+) -> tuple[Derived, GeomGrid, Fractions, bool]:
+    """``derive_geom`` with cut-cell CFL auto; returns whether a second derive pass ran."""
+    provisional = provisional_geom_cfl(cfg.numerics)
+    derived, gg = derive_geom(cfg, geometry, cfl_safety=provisional)
+    cgrid = cut_grid(gg)
+    fractions = compute_fractions(geometry, cgrid)
+    n_cut = int(fractions.stats.get("n_cut_cells", 0))
+    resolved, source = resolve_parametric_cfl(cfg.numerics, n_cut)
+    second_pass = resolved != provisional
+    if second_pass:
+        derived, gg = derive_geom(cfg, geometry, cfl_safety=resolved)
+    derived = replace(
+        derived,
+        cfl_safety_resolved=resolved,
+        cfl_safety_source=source,
+    )
+    return derived, gg, fractions, second_pass
+
+
 def resolve_drive_indices(cfg: Config) -> list[int]:
     """Radiator indices to drive, in config order; radiator 0 is always included."""
     if test_source_active(cfg):
@@ -119,7 +149,7 @@ def prepare_geom_run(
     geometry = build_geometry(cfg)
     if geometry is None:
         raise ValueError("prepare_geom_run requires parametric geometry")
-    derived, gg = derive_geom(cfg, geometry)
+    derived, gg, fractions, _ = _derive_geom_with_cfl_resolution(cfg, geometry)
     errors, warnings = validate_geom(cfg, derived, geometry)
     _print_warnings(warnings)
     if errors:
@@ -127,6 +157,10 @@ def prepare_geom_run(
     fields = allocate_fields(gg)
     coeffs = make_update_coeffs(cfg.air.rho, cfg.air.c, derived.h, derived.dt)
     cpml = make_cpml_state(gg, cfg, derived, derived.dt)
+    if cache is None:
+        cache = build_geom_op_cache(
+            cfg, derived, gg, geometry, fractions=fractions
+        )
     op, info = build_run_operator(
         cfg, derived, gg, geometry, driven=driven, cache=cache
     )
@@ -216,11 +250,11 @@ def dry_run_geom(cfg: Config, *, out_path: Path | None = None) -> dict[str, Any]
     geometry = build_geometry(cfg)
     if geometry is None:
         raise ValueError("dry_run_geom requires parametric geometry")
-    derived, gg = derive_geom(cfg, geometry)
+    derived, gg, fractions, _ = _derive_geom_with_cfl_resolution(cfg, geometry)
     errors, warnings = validate_geom(cfg, derived, geometry)
     if errors:
         raise ValueError("; ".join(errors))
-    cache = build_geom_op_cache(cfg, derived, gg, geometry)
+    cache = build_geom_op_cache(cfg, derived, gg, geometry, fractions=fractions)
     drive = resolve_drive_indices(cfg)
     _, info = build_run_operator(cfg, derived, gg, geometry, driven=drive[0], cache=cache)
     _print_warnings(warnings)
@@ -264,6 +298,8 @@ def dry_run_geom(cfg: Config, *, out_path: Path | None = None) -> dict[str, Any]
         "f_min_hz": cfg.band.f_min,
         "f_max_hz": derived.f_max,
         "ppw_realized": derived.ppw_realized,
+        "cfl_safety_resolved": derived.cfl_safety_resolved,
+        "cfl_safety_source": derived.cfl_safety_source,
         "cells_across_radiator": _cells_across_radiator(cfg, derived),
         "memory_bytes": mem,
         "decimation_m": m,

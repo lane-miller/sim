@@ -202,6 +202,8 @@ def _dry_run_summary(cfg: Config, derived: Derived) -> dict[str, Any]:
         "f_min_hz": cfg.band.f_min,
         "f_max_hz": derived.f_max,
         "ppw_realized": derived.ppw_realized,
+        "cfl_safety_resolved": derived.cfl_safety_resolved,
+        "cfl_safety_source": derived.cfl_safety_source,
         "cells_across_radiator": _cells_across_radiator(cfg, derived),
         "memory_bytes": mem,
         "decimation_m": m,

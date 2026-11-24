@@ -17,6 +17,7 @@ from boxrad.config import (  # noqa: E402
     Output,
     Radiator,
     SQRT3,
+    cfl_for_legacy_derive,
     derive,
 )
 from boxrad.cpml import apply_p, make_cpml_state  # noqa: E402
@@ -28,7 +29,7 @@ _F64 = np.float64
 
 
 def _sync_dt(cfg: Config, d: object) -> None:
-    d.dt = cfg.numerics.cfl_safety * d.h / (cfg.air.c * SQRT3)  # type: ignore[attr-defined]
+    d.dt = cfl_for_legacy_derive(cfg.numerics) * d.h / (cfg.air.c * SQRT3)  # type: ignore[attr-defined]
 
 
 def _tiny_baffle():

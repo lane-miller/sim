@@ -16,6 +16,7 @@ from boxrad.config import (  # noqa: E402
     Output,
     Radiator,
     SQRT3,
+    cfl_for_legacy_derive,
     derive,
 )
 from boxrad.grid import Grid, allocate_fields, build_cpml_slabs  # noqa: E402
@@ -26,7 +27,7 @@ _FLOAT32 = np.dtype(np.float32)
 
 def _sync_dt(cfg: Config, d: object, cfl_safety: float | None = None) -> float:
     """Recompute ``d.dt`` from ``d.h``, air speed, and CFL safety (keeps coeffs in sync)."""
-    cs = cfg.numerics.cfl_safety if cfl_safety is None else cfl_safety
+    cs = cfl_for_legacy_derive(cfg.numerics) if cfl_safety is None else cfl_safety
     dt = cs * d.h / (cfg.air.c * SQRT3)
     d.dt = dt
     return dt

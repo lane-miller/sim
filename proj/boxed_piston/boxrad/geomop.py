@@ -164,10 +164,13 @@ def build_geom_op_cache(
     derived: Derived,
     gg: GeomGrid,
     geometry: Geometry,
+    *,
+    fractions: Fractions | None = None,
 ) -> GeomOpCache:
     """One-shot fractions + floor for reuse across ``driven`` runs."""
     cgrid = cut_grid(gg)
-    fractions = compute_fractions(geometry, cgrid)
+    if fractions is None:
+        fractions = compute_fractions(geometry, cgrid)
     max_thin = getattr(cfg.numerics, "max_thin_cells", None) or 0
     _, thin_stats = thin_wall_cells(fractions, geometry, cgrid, max_thin=max_thin)
     lam = courant_lambda(cfg, derived)

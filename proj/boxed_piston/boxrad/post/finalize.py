@@ -86,6 +86,8 @@ def write_finalize_meta(
 
     acc = meta.require_group("accuracy")
     acc.attrs["ppw_realized"] = float(derived.ppw_realized)
+    acc.attrs["cfl_safety_resolved"] = float(derived.cfl_safety_resolved)
+    acc.attrs["cfl_safety_source"] = str(derived.cfl_safety_source)
     acc.attrs["cells_across_radiator"] = float(cells_across_radiator(cfg, derived))
     acc.attrs["h"] = float(derived.h)
     acc.attrs["alias_level_db"] = float(derived.alias_level_db)
