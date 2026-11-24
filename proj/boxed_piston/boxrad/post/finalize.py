@@ -8,9 +8,8 @@ import numpy as np
 
 from boxrad import __version__
 from boxrad.config import Config, Derived, test_source_active
-from boxrad.post.spectra import spectrum_rows
-from boxrad.post.transfer import load_radiator_velocity_spectrum, p_avg_tail_db
-from boxrad.post.zrad import causal_end_taper, log_frequency_grid, zrad_at_frequencies
+from boxrad.post.transfer import p_avg_tail_db
+from boxrad.post.zrad import log_frequency_grid, zrad_at_frequencies
 
 _ACCURACY_NOTES = (
     "dispersion: ≈1% |Δz| at f_max for ppw 20, scales ≈ "
@@ -112,75 +111,6 @@ def write_finalize_meta(
     dset.attrs["convention"] = (
         "z(f) = ⟨p⟩_rad(f) / (ρ c V(f)); e^{+jωt}; dimensionless; "
         "Δt-weighted discrete spectra at stored radiator times"
-    )
-
-
-def finalize_wall_surface_transfer(
-    p_ts: np.ndarray,
-    times_p: np.ndarray,
-    f_log: np.ndarray,
-    *,
-    path: Any,
-    derived: Derived,
-    test_source: bool,
-) -> np.ndarray:
-    """Frequency transfer ``(n_f, n_wet)``: Pa/(m/s) per unit ``v`` or Pa/(m³/s) for test source."""
-    p_ts = np.asarray(p_ts, dtype=np.float64)
-    times_p = np.asarray(times_p, dtype=np.float64).ravel()
-    f_log = np.asarray(f_log, dtype=np.float64).ravel()
-    if p_ts.size == 0 or times_p.size == 0:
-        return np.zeros((f_log.size, p_ts.shape[1] if p_ts.ndim > 1 else 0), dtype=np.complex128)
-    win = causal_end_taper(int(p_ts.shape[0]))
-    p_win = p_ts * win[:, np.newaxis]
-    p_f = np.asarray(spectrum_rows(p_win, times_p, f_log), dtype=np.complex128)
-    if test_source:
-        return p_f
-    out = np.empty_like(p_f)
-    for i, f_hz in enumerate(f_log):
-        v_ref = load_radiator_velocity_spectrum(path, derived, float(f_hz))
-        out[i] = p_f[i] / v_ref
-    return out
-
-
-def write_surface_transfer(
-    file: Any,
-    cfg: Config,
-    derived: Derived,
-    *,
-    p_ts: np.ndarray,
-    times_p: np.ndarray,
-    f_log: np.ndarray | None = None,
-) -> None:
-    """Replace decimated time series in ``/surface`` with complex ``surface/p`` on ``f_log``."""
-    if "surface" not in file:
-        return
-    surf = file["surface"]
-    if f_log is None:
-        f_log = log_frequency_grid(float(cfg.band.f_min), float(derived.f_max), points_per_decade=100)
-    test_source = bool(test_source_active(cfg) and int(file["meta"].attrs.get("n_radiators", 0)) == 0)
-    h_trans = finalize_wall_surface_transfer(
-        p_ts,
-        times_p,
-        f_log,
-        path=file,
-        derived=derived,
-        test_source=test_source,
-    )
-    for key in ("p_raw", "times_p"):
-        if key in surf:
-            del surf[key]
-    if "p" in surf:
-        del surf["p"]
-    dset = surf.create_dataset(
-        "p",
-        data=h_trans.astype(np.complex128),
-        compression="gzip",
-    )
-    dset.attrs["f"] = f_log.astype(np.float64)
-    dset.attrs["convention"] = (
-        "Pa/(m³/s) per unit monopole strength (test source)"
-        if test_source
-        else "H = p/v at fluid cell center adjacent to patch; e^{+jωt}"
     )
 
 

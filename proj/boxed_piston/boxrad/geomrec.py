@@ -15,12 +15,7 @@ from boxrad.geom.geometry import Geometry
 from boxrad.geomderive import GeomGrid
 from boxrad.grid import Fields
 from boxrad.cutcell import wetted_wall_arrays
-from boxrad.post.finalize import (
-    compute_finalize_results,
-    write_finalize_meta,
-    write_surface_transfer,
-)
-from boxrad.post.zrad import log_frequency_grid
+from boxrad.post.finalize import compute_finalize_results, write_finalize_meta
 from boxrad.post.zrow import write_zrad_row_dataset, zrad_row_at_frequencies
 from boxrad.post.kirchhoff import SurfacePatches, huygens_box_patches
 from boxrad.recorder import (
@@ -331,6 +326,22 @@ def _cell_center(gg: GeomGrid, flat: int) -> np.ndarray:
     return x0 + (np.array([i, j, k], dtype=_F64) + 0.5) * h
 
 
+def _wall_surface_points(
+    cell_centers: np.ndarray,
+    patch_centroids: np.ndarray,
+    area_vectors: np.ndarray,
+) -> np.ndarray:
+    """``x_s = x_c − ((x_c − x̄_w)·n̂_w) n̂_w`` with ``n̂_w`` from ``N_w`` (world frame)."""
+    x_c = np.asarray(cell_centers, dtype=_F64)
+    x_bar = np.asarray(patch_centroids, dtype=_F64)
+    avec = np.asarray(area_vectors, dtype=_F64)
+    norms = np.linalg.norm(avec, axis=1, keepdims=True)
+    n_hat = avec / np.maximum(norms, 1e-30)
+    delta = x_c - x_bar
+    proj = np.sum(delta * n_hat, axis=1, keepdims=True)
+    return x_c - proj * n_hat
+
+
 class GeomRecorder:
     """Incremental HDF5 writer for parametric geometry; call :meth:`sample` after :func:`step_geom`.
 
@@ -459,8 +470,15 @@ class GeomRecorder:
         self._n_wet = int(cells_w.shape[0])
         self._sf_p_idx = cells_w.astype(np.int64) if self._record_surface else np.empty(0, dtype=np.int64)
         self._sf_areas = areas_w
-        self._sf_centroids = cents_w
+        self._sf_patch_centroids = cents_w
         self._sf_area_vec = avec_w
+        if self._record_surface and self._n_wet > 0:
+            cell_ctrs = np.empty((self._n_wet, 3), dtype=_F64)
+            for q, flat in enumerate(cells_w):
+                cell_ctrs[q] = _cell_center(gg, int(flat))
+            self._sf_points = _wall_surface_points(cell_ctrs, cents_w, avec_w)
+        else:
+            self._sf_points = np.empty((0, 3), dtype=_F64)
 
         probe_targets = self._resolve_probe_targets(cfg)
         self._n_probes = len(probe_targets)
@@ -646,13 +664,22 @@ class GeomRecorder:
             surf = self._file.create_group("surface")
             surf.attrs["surface_kind"] = "wall_patches"
             surf.attrs["n_wet"] = int(self._n_wet)
-            surf.create_dataset("points", data=self._sf_centroids.astype(_F64), compression="gzip")
+            surf.create_dataset(
+                "patch_centroids", data=self._sf_patch_centroids.astype(_F64), compression="gzip"
+            )
+            surf.create_dataset("points", data=self._sf_points.astype(_F64), compression="gzip")
             avec = self._sf_area_vec.astype(_F64)
             areas = self._sf_areas.astype(_F64)
             norms = avec / np.linalg.norm(avec, axis=1, keepdims=True)
             surf.create_dataset("normals", data=norms, compression="gzip")
             surf.create_dataset("areas", data=areas, compression="gzip")
             surf.create_dataset("area_vectors", data=avec, compression="gzip")
+            surf.attrs["sampling"] = (
+                "p is the wetted pressure cell sample; surface/points x_s is that cell "
+                "center projected onto the patch plane (∂p/∂n = 0 on a rigid wall); "
+                "patch_centroids x̄_w are mesh patch centroids; "
+                "p at time level (n+1)Δt after step(n)"
+            )
             surf.attrs["p_times"] = "t_p = (n+1)Δt at decimated steps n ≡ 0 (mod M)"
             meta.attrs["surface_kind"] = "wall_patches"
         elif not self._record_surface:
@@ -725,7 +752,7 @@ class GeomRecorder:
         if self._record_surface and self._n_wet > 0:
             surf = self._file["surface"]
             nw = self._n_wet
-            self._ds_sf_p = self._create_extensible(surf, "p_raw", (nw,), _F32, buf)
+            self._ds_sf_p = self._create_extensible(surf, "p_t", (nw,), _F32, buf)
             self._ds_sf_tp = self._create_extensible(surf, "times_p", (), _F64, buf)
             self._w_sf_p = _ChunkWriter(self._ds_sf_p, buf)
             self._w_sf_tp = _ChunkWriter(self._ds_sf_tp, buf)
@@ -864,27 +891,6 @@ class GeomRecorder:
             self._file.flush()
             self._file.close()
             self._file = None  # type: ignore[assignment]
-
-        f_log = log_frequency_grid(
-            float(self.cfg.band.f_min), float(self.derived.f_max), points_per_decade=100
-        )
-        if self._ds_sf_p is not None:
-            with h5.File(self._path, "r") as f_read:
-                if "surface" in f_read and "p_raw" in f_read["surface"]:
-                    p_sf = np.asarray(f_read["surface/p_raw"][()], dtype=_F64)
-                    t_sf = np.asarray(f_read["surface/times_p"][()], dtype=_F64)
-                else:
-                    p_sf = np.empty((0, 0), _F64)
-                    t_sf = np.empty(0, _F64)
-            with h5.File(self._path, "a") as f_append:
-                write_surface_transfer(
-                    f_append,
-                    self.cfg,
-                    self.derived,
-                    p_ts=p_sf,
-                    times_p=t_sf,
-                    f_log=f_log,
-                )
 
         if self._test_source_only:
             with h5.File(self._path, "a") as f_append:

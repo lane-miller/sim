@@ -43,6 +43,31 @@ def probe_fdtd_pressure_spectrum(
     return complex(spectrum(col * win, t, float(f_hz)))
 
 
+def wall_patches_transfer_at_frequencies(
+    p_ts: np.ndarray,
+    times_p: np.ndarray,
+    f_arr: np.ndarray,
+    *,
+    source: str | Path | Any,
+    derived: object,
+) -> np.ndarray:
+    """Wall-patch transfer ``(n_f, n_wet)``; DFT matches :func:`probe_fdtd_pressure_spectrum`."""
+    f_arr = np.atleast_1d(np.asarray(f_arr, dtype=_F64))
+    p_ts = np.asarray(p_ts, dtype=_F64)
+    times_p = np.asarray(times_p, dtype=_F64).ravel()
+    ncol = int(p_ts.shape[1]) if p_ts.ndim > 1 and p_ts.shape[0] else 0
+    if p_ts.size == 0 or times_p.size == 0:
+        return np.zeros((f_arr.size, ncol), dtype=_C128)
+    win = causal_end_taper(int(p_ts.shape[0]))
+    p_win = p_ts * win[:, np.newaxis]
+    p_f = np.asarray(spectrum_rows(p_win, times_p, f_arr), dtype=_C128)
+    out = np.empty_like(p_f)
+    for i, f_hz in enumerate(f_arr):
+        v_ref = load_radiator_velocity_spectrum(source, derived, float(f_hz))
+        out[i] = p_f[i] / v_ref
+    return out
+
+
 def kh_huygens_pressure_at_points(
     points: np.ndarray,
     patches: SurfacePatches,
@@ -100,7 +125,10 @@ def load_radiator_velocity_spectrum(source: str | Path | Any, derived: object, f
         f = h5py.File(Path(source), "r")
         owned = True
     try:
-        t_rad = np.asarray(f["radiator/times_p"][()], dtype=_F64)
+        if "radiator" in f:
+            t_rad = np.asarray(f["radiator/times_p"][()], dtype=_F64)
+        else:
+            t_rad = np.asarray(f["huygens/times_p"][()], dtype=_F64)
         v_rad = np.array(
             [
                 velocity_pulse(float(t), derived.pulse_sigma, derived.pulse_t0)  # type: ignore[attr-defined]

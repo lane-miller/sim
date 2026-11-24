@@ -34,6 +34,7 @@ from boxrad.post.transfer import (
     load_box_surface_spectrum,
     load_huygens_spectra,
     probe_fdtd_pressure_spectrum,
+    wall_patches_transfer_at_frequencies,
 )
 from boxrad.post.zrow import zrow_at_frequencies
 from boxrad.post.zrad import zrad_at_frequencies
@@ -670,34 +671,31 @@ class Result:
             return "box_faces"
         return "none"
 
-    def _surface_transfer_table(self) -> tuple[np.ndarray, np.ndarray]:
-        f_h5 = self._file()
-        if "surface" not in f_h5 or "p" not in f_h5["surface"]:
-            raise ValueError("HDF5 has no finalized surface/p dataset")
-        dset = f_h5["surface/p"]
-        f_tab = np.asarray(dset.attrs["f"], dtype=_F64).ravel()
-        p_tab = np.asarray(dset[()], dtype=_C128)
-        return f_tab, p_tab
-
     def _surface_at_frequencies(self, f_arr: np.ndarray) -> np.ndarray:
-        f_tab, p_tab = self._surface_transfer_table()
-        out = np.zeros((f_arr.size, p_tab.shape[1]), dtype=_C128)
-        for i, f_hz in enumerate(f_arr):
-            j = int(np.argmin(np.abs(f_tab - float(f_hz))))
-            if abs(f_tab[j] - float(f_hz)) > max(1e-6 * abs(f_hz), 1e-9):
-                raise ValueError(
-                    f"surface/p table has no entry near f={float(f_hz):.6g} Hz "
-                    f"(nearest {f_tab[j]:.6g} Hz)"
-                )
-            out[i] = p_tab[j]
-        return out
+        f_h5 = self._file()
+        if "surface" not in f_h5 or "p_t" not in f_h5["surface"]:
+            raise ValueError("HDF5 has no surface/p_t time series")
+        p_ts = np.asarray(f_h5["surface/p_t"][()], dtype=_F64)
+        t_p = np.asarray(f_h5["surface/times_p"][()], dtype=_F64)
+        return wall_patches_transfer_at_frequencies(
+            p_ts,
+            t_p,
+            np.asarray(f_arr, dtype=_F64),
+            source=self.path,
+            derived=self.derived,
+        )
 
     def surface_points(
         self,
         *,
         frame: Literal["local", "world"] | None = None,
     ) -> np.ndarray:
-        """Wetted-wall patch centroids ``(n_wet, 3)`` in the chosen frame (wall patches only)."""
+        """Wall sampling locations ``(n_wet, 3)`` in the chosen frame (wall patches only).
+
+        Each row is ``x_s``: the wetted pressure cell center projected onto its patch
+        plane (``∂p/∂n = 0`` on a rigid wall). The transfer ``surface_p`` is the cell
+        pressure, not a value extrapolated to ``x_s``.
+        """
         frame_sel = self._resolve_frame(frame)
         f_h5 = self._file()
         kind = self._surface_kind()
@@ -1058,8 +1056,11 @@ class Result:
         """Surface pressure transfer on stored patches.
 
         **Wall patches** (``surface_kind = wall_patches``): call ``surface_p(f)``
-        with a single frequency argument; returns complex ``(n_f, n_wet)`` in
-        Pa/(m³/s) for a test source or Pa/(m/s) per unit radiator velocity.
+        with frequency argument(s); returns complex ``(n_f, n_wet)`` at arbitrary
+        ``f`` (same DFT and drive normalization as probes) in Pa/(m³/s) for a test
+        source or Pa/(m/s) per unit radiator velocity. Each column is the wetted
+        cell's pressure; ``surface_points`` gives the wall location below that cell
+        center (normal projection); ``∂p/∂n = 0`` on a rigid wall.
 
         **Box faces** (legacy): call ``surface_p(points, f)``; each point maps to
         the nearest stored ``h × h`` patch. Net force on the body uses

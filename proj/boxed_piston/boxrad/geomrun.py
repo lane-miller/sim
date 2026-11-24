@@ -260,6 +260,7 @@ def dry_run_geom(cfg: Config, *, out_path: Path | None = None) -> dict[str, Any]
     _print_warnings(warnings)
 
     m = resolve_decimation_factor(cfg, derived)
+    n_dec = (derived.n_steps + m - 1) // m if derived.n_steps else 0
     dt_dec = m * derived.dt
     f_nyq = 0.5 / dt_dec if dt_dec > 0.0 else float("nan")
     mem = estimate_memory_bytes(derived.nx, derived.ny, derived.nz, derived.cpml_cells)
@@ -306,6 +307,7 @@ def dry_run_geom(cfg: Config, *, out_path: Path | None = None) -> dict[str, Any]
         "h": derived.h,
         "dt": derived.dt,
         "n_steps": derived.n_steps,
+        "T_dec": int(n_dec),
         "f_min_hz": cfg.band.f_min,
         "f_max_hz": derived.f_max,
         "ppw_realized": derived.ppw_realized,

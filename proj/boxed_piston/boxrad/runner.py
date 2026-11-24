@@ -151,14 +151,7 @@ def estimate_output_bytes(
     nbytes += n_dec * (nh * 4 + nh * 4 + nb * 4)  # huygens + box p (float32)
     nbytes += n_dec * 4 * 8  # decimated time stamps (float64)
     if cfg.geometry not in ("box", "baffle") and cfg.output.surface_p and n_wet > 0:
-        from boxrad.post.zrad import log_frequency_grid
-
-        n_f = int(
-            log_frequency_grid(float(cfg.band.f_min), float(derived.f_max)).size
-        )
-        nbytes += n_dec * n_wet * 4  # surface p_raw float32 while recording
-        nbytes += n_dec * 8
-        nbytes += n_f * n_wet * 16  # complex128 surface/p after finalize
+        nbytes += n_dec * n_wet * 4  # surface/p_t float32 (T_dec, n_wet)
     return int(nbytes)
 
 
