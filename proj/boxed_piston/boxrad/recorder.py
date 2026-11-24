@@ -163,6 +163,58 @@ def _resolve_probe_targets(cfg: Config, grid: Grid) -> list[tuple[float, float, 
     return targets
 
 
+def _cpml_free_center_bounds(
+    slabs,
+    *,
+    grid: Grid | None = None,
+    x0: np.ndarray | None = None,
+    h: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Physical (m) min/max pressure cell centers over the CPML-free interior."""
+    i0, i1 = slabs.i_inner.lo, slabs.i_inner.hi
+    j0, j1 = slabs.j_inner.lo, slabs.j_inner.hi
+    k0, k1 = slabs.k_inner.lo, slabs.k_inner.hi
+    if i1 <= i0 or j1 <= j0 or k1 <= k0:
+        raise ValueError("CPML-free interior is empty")
+    if grid is not None:
+        lo = np.array([grid.x_p[i0], grid.y_p[j0], grid.z_p[k0]], dtype=_F64)
+        hi = np.array([grid.x_p[i1 - 1], grid.y_p[j1 - 1], grid.z_p[k1 - 1]], dtype=_F64)
+        return lo, hi
+    if x0 is None or h is None:
+        raise ValueError("grid or (x0, h) required for CPML-free bounds")
+    x0 = np.asarray(x0, dtype=_F64).reshape(3)
+    hh = float(h)
+    lo = x0 + (np.array([i0, j0, k0], dtype=_F64) + 0.5) * hh
+    hi = x0 + (np.array([i1, j1, k1], dtype=_F64) - 0.5) * hh
+    return lo, hi
+
+
+def _assert_probe_not_in_cpml(
+    q: int,
+    x: float,
+    y: float,
+    z: float,
+    i: int,
+    j: int,
+    k: int,
+    slabs,
+    bounds_lo: np.ndarray,
+    bounds_hi: np.ndarray,
+) -> None:
+    i0, i1 = slabs.i_inner.lo, slabs.i_inner.hi
+    j0, j1 = slabs.j_inner.lo, slabs.j_inner.hi
+    k0, k1 = slabs.k_inner.lo, slabs.k_inner.hi
+    if i0 <= i < i1 and j0 <= j < j1 and k0 <= k < k1:
+        return
+    bl = bounds_lo
+    bh = bounds_hi
+    raise ValueError(
+        f"probe {q} at ({x},{y},{z}) maps to p index ({i},{j},{k}) "
+        f"inside CPML on an absorbing side; CPML-free interior cell centers "
+        f"lie within [{bl[0]},{bh[0]}]×[{bl[1]},{bh[1]}]×[{bl[2]},{bh[2]}] (m)"
+    )
+
+
 def _probe_indices(grid: Grid, targets: list[tuple[float, float, float]]) -> tuple[np.ndarray, np.ndarray]:
     """Nearest pressure cell center for each target (documented probe rule).
 
@@ -172,8 +224,11 @@ def _probe_indices(grid: Grid, targets: list[tuple[float, float, float]]) -> tup
     idx = np.empty(n, dtype=np.int64)
     centers = np.empty((n, 3), dtype=_F64)
     shape = (grid.nx, grid.ny, grid.nz)
+    slabs = grid.cpml_slabs
+    bounds_lo, bounds_hi = _cpml_free_center_bounds(slabs, grid=grid)
     for q, (x, y, z) in enumerate(targets):
         i, j, k = grid.index_of(x, y, z)
+        _assert_probe_not_in_cpml(q, x, y, z, i, j, k, slabs, bounds_lo, bounds_hi)
         idx[q] = int(np.ravel_multi_index((i, j, k), shape))
         centers[q, 0], centers[q, 1], centers[q, 2] = grid.coords_of(i, j, k)
     return idx, centers

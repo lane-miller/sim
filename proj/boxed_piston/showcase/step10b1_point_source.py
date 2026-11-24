@@ -22,7 +22,6 @@ sys.path.insert(0, str(_PKG))
 from boxrad import Result  # noqa: E402
 from boxrad.config import Config  # noqa: E402
 from boxrad.geomrun import dry_run_geom  # noqa: E402
-from boxrad.post.directivity import di_from_pattern  # noqa: E402
 from boxrad.post.transfer import h_transfer_err, probe_fdtd_pressure_spectrum  # noqa: E402
 from boxrad.runner import keep_awake, run  # noqa: E402
 from boxrad.validation.analytic import monopole_free  # noqa: E402
@@ -94,6 +93,8 @@ def main() -> None:
     probe_db: list[float] = []
     probe_ph: list[float] = []
     ff_db: list[float] = []
+    ff_ph: list[float] = []
+    di_abs: list[float] = []
 
     with Result(h5_path, frame="world") as res:
         import h5py
@@ -102,8 +103,6 @@ def main() -> None:
             t_pr = np.asarray(f["probes/times_p"][()], dtype=_F64)
             p_ts = np.asarray(f["probes/p"][()], dtype=_F64)
             centers = np.asarray(f["probes/centers"][()], dtype=_F64)
-        h = float(res.derived.h)
-        lam0 = c / 1000.0
         for f_hz in _FREQS:
             lam = c / f_hz
             print(f"\n--- f = {f_hz:.0f} Hz  R/λ probe0 = {np.linalg.norm(centers[1] - src) / lam:.4g}")
@@ -128,16 +127,40 @@ def main() -> None:
                 db, deg = h_transfer_err(p_ref[0, 0], p_fd)
                 print(f"  far {dname}  dB {db:+.4f}  deg {deg:+.2f}")
                 ff_db.append(db)
+                ff_ph.append(deg)
                 row_ff["directions"].append({"name": dname, "db": db, "deg": deg})
             results["far_field"].append(row_ff)
 
-            th = np.linspace(0.0, math.pi, 24)
-            ph = np.linspace(0.0, 2.0 * math.pi, 48, endpoint=False)
-            th_g, ph_g = np.meshgrid(th, ph, indexing="ij")
-            d_pat = res.directivity(th_g.ravel(), ph_g.ravel(), f_hz, frame="world")
-            di = di_from_pattern(th_g, ph_g, d_pat)
-            results["di_db"][str(int(f_hz))] = float(20.0 * math.log10(abs(di)))
-            print(f"  DI {results['di_db'][str(int(f_hz))]:+.3f} dB")
+            di_db = float(res.directivity_index(f_hz, frame="world")[0])
+            results["di_db"][str(int(f_hz))] = di_db
+            di_abs.append(abs(di_db))
+            print(f"  DI {di_db:+.3f} dB")
+
+    max_probe_db = max(abs(x) for x in probe_db)
+    max_probe_deg = max(abs(x) for x in probe_ph)
+    max_ff_db = max(abs(x) for x in ff_db)
+    max_ff_deg = max(abs(x) for x in ff_ph)
+    max_di = max(di_abs)
+    ok_probe = max_probe_db <= _GATE_PROBE_DB and max_probe_deg <= _GATE_PROBE_DEG
+    ok_ff = max_ff_db <= _GATE_FF_DB and max_ff_deg <= _GATE_FF_DEG
+    ok_di = max_di <= _GATE_DI_DB
+    print(
+        f"\ngate probes: max |dB|={max_probe_db:.4f} (≤ {_GATE_PROBE_DB}), "
+        f"max |deg|={max_probe_deg:.2f} (≤ {_GATE_PROBE_DEG})  "
+        f"{'PASS' if ok_probe else 'FAIL'}"
+    )
+    print(
+        f"gate far field: max |dB|={max_ff_db:.4f} (≤ {_GATE_FF_DB}), "
+        f"max |deg|={max_ff_deg:.2f} (≤ {_GATE_FF_DEG})  "
+        f"{'PASS' if ok_ff else 'FAIL'}"
+    )
+    print(f"gate |DI|: max={max_di:.4f} dB (≤ {_GATE_DI_DB})  {'PASS' if ok_di else 'FAIL'}")
+    results["gates"] = {
+        "probes_pass": ok_probe,
+        "far_field_pass": ok_ff,
+        "di_pass": ok_di,
+        "pass": bool(ok_probe and ok_ff and ok_di),
+    }
 
     json_path.write_text(json.dumps(to_json_safe(results), indent=2), encoding="utf-8")
 

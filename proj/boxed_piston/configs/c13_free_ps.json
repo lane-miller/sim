@@ -13,7 +13,7 @@
     "h_override": 0.005,
     "cells_across_radiator": 10,
     "cfl_safety": 0.99,
-    "gap_cells": null,
+    "gap_cells": 24,
     "cpml_cells": 16,
     "cpml_alpha_factor": 1.0,
     "cpml_m": 3.0,

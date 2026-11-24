@@ -21,6 +21,8 @@ from boxrad.recorder import (
     _CONVENTIONS,
     _ChunkWriter,
     _STENCIL_W4,
+    _assert_probe_not_in_cpml,
+    _cpml_free_center_bounds,
     resolve_decimation_factor,
     resolve_huygens_offset,
     validate_huygens_clearance,
@@ -497,6 +499,8 @@ class GeomRecorder:
         x0 = gg.x0.astype(_F64)
         h = gg.h
         domain_hi = x0 + np.array([gg.nx, gg.ny, gg.nz], dtype=_F64) * h
+        slabs = gg.cpml_slabs
+        bounds_lo, bounds_hi = _cpml_free_center_bounds(slabs, x0=x0, h=h)
         planes = list(self.geometry.planes)
 
         def _behind_plane(xv: float, yv: float, zv: float) -> str | None:
@@ -529,6 +533,7 @@ class GeomRecorder:
                 )
             i, j, k = _p_index_from_xyz(gg, x, y, z)
             flat = _assert_in_p(gg, i, j, k)
+            _assert_probe_not_in_cpml(q, x, y, z, i, j, k, slabs, bounds_lo, bounds_hi)
             if beta_flat[flat] == 0.0:
                 raise ValueError(
                     f"probe {q} at ({x},{y},{z}) maps to solid cell ({i},{j},{k})"

@@ -144,6 +144,30 @@ def test_monopole_free_hand_value():
     assert abs(p[0, 0] - ref) <= 1e-12 * abs(ref)
 
 
+def test_probe_in_cpml_rejected(tmp_path):
+    cfg = _cfg(
+        {
+            "geometry": "parametric",
+            "parts": [],
+            "radiators": [],
+            "band": {"f_min": 50.0, "f_max": 1000.0},
+            "numerics": {
+                "h_override": 0.02,
+                "gap_cells": 2,
+                "cpml_cells": 4,
+                "n_transits": 1.0,
+                "test_source": {"position": [0.0, 0.0, 0.0]},
+            },
+            "output": {"path": "", "probes": [[0.1, 0.0, 0.0]]},
+        }
+    )
+    from boxrad.geomrec import GeomRecorder
+
+    run = prepare_geom_run(cfg)
+    with pytest.raises(ValueError, match="CPML"):
+        GeomRecorder(cfg, run.derived, run.gg, run.geometry, run.info, tmp_path / "x.h5")
+
+
 def test_source_inside_solid_rejected():
     cfg = _cfg(
         {
