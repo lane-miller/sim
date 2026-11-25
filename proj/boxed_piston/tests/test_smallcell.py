@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from boxrad.config import Config, derive
+from boxrad.config import CFL_CUTCELL, Config, derive
 from boxrad.cutcell import Grid, compute_fractions, grid_for_geometry
 from boxrad.geom import geometry, mesh
 from boxrad.geom.geometry import build_geometry
@@ -195,4 +195,13 @@ def test_delta_eq_s1() -> None:
     _, st = apply_floor(fr, lam, h=H)
     assert st["delta_eq_over_h"] == pytest.approx(0.047, abs=0.003)
     assert st["floor_status"] == "check"
+    print(f"S1 delta_eq/h = {st['delta_eq_over_h']:.6g} ({st['floor_status']})")
+
+
+def test_delta_eq_s1_auto() -> None:
+    _, _, grid, fr, _ = _showcase_geom("s1_cylinder.json")
+    lam = CFL_CUTCELL / math.sqrt(3.0)
+    _, st = apply_floor(fr, lam, h=H)
+    assert st["delta_eq_over_h"] < 0.01
+    assert st["floor_status"] == "ok"
     print(f"S1 delta_eq/h = {st['delta_eq_over_h']:.6g} ({st['floor_status']})")

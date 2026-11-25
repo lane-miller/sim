@@ -115,3 +115,39 @@ def test_dry_run_geom_sphere_auto_reports_07():
     est = dry_run_geom(cfg)
     assert est["cfl_safety_resolved"] == CFL_CUTCELL
     assert est["cfl_safety_source"] == "auto_cutcell"
+
+
+_SHOWCASE_FIXTURES = (
+    ("s1_cylinder.json", CFL_CUTCELL, "auto_cutcell", False),
+    ("s2_bookshelf.json", CFL_DEFAULT, "default", True),
+    ("s3p_c09_parametric.json", CFL_DEFAULT, "default", True),
+    ("s4_tilted.json", CFL_CUTCELL, "auto_cutcell", False),
+    ("s5_platform.json", CFL_DEFAULT, "default", True),
+    ("s6_downfire.json", CFL_CUTCELL, "auto_cutcell", False),
+)
+
+
+@pytest.mark.parametrize(
+    "fixture,resolved,source,dt_parity",
+    _SHOWCASE_FIXTURES,
+    ids=[t[0].replace(".json", "") for t in _SHOWCASE_FIXTURES],
+)
+def test_showcase_s1_s6_auto_cfl(
+    fixture: str,
+    resolved: float,
+    source: str,
+    dt_parity: bool,
+) -> None:
+    path = SHOWCASE / fixture
+    raw = _load_json(path)
+    assert "cfl_safety" not in raw.get("numerics", {})
+    cfg = Config.from_json(path.read_text())
+    assert cfg.numerics.cfl_safety is None
+    est = dry_run_geom(cfg)
+    assert est["cfl_safety_resolved"] == resolved
+    assert est["cfl_safety_source"] == source
+    if dt_parity:
+        raw99 = copy.deepcopy(raw)
+        raw99["numerics"]["cfl_safety"] = CFL_DEFAULT
+        est99 = dry_run_geom(Config.from_dict(raw99))
+        assert est["dt"] == est99["dt"]

@@ -159,7 +159,7 @@ radiator-resolution limit on $h$.
 | `ppw` | float | — | 20.0 | Points per wavelength at `f_max`: $h \le \lambda_\mathrm{min}/$`ppw` | Realized ppw < 20 gives a warning |
 | `cells_across_radiator` | int | — | 10 | Minimum cells across $D_r$: $h \le D_r/$`cells_across_radiator` | — |
 | `h_override` | float or `null` | m | `null` | Fixed grid spacing. Bypasses the `ppw` and radiator rules (used by validation sweeps) | Warning whenever set |
-| `cfl_safety` | float | — | 0.99 | $\Delta t = $ `cfl_safety`$\cdot h/(c\sqrt3)$ | ≤ 1 (3-D CFL limit) |
+| `cfl_safety` | float | — | auto | Optional. $\Delta t = s\,h/(c\sqrt3)$ with resolved $s$ (0.99 on box/baffle and on parametric/STEP grids without cut cells; 0.7 when the grid has cut cells; a user value always wins) | ≤ 1 (3-D CFL limit) |
 | `gap_cells` | int or `null` | cells | `null` → 10 | Air cells between the box (or radiator bounding box) and the CPML | ≥ 5, because the Huygens surface at 3 cells needs 2 more (error otherwise); < 10 gives a warning |
 | `cpml_cells` | int | cells | 16 | CPML thickness | < 16 gives a warning |
 | `cpml_alpha_factor` | float | — | 1.0 | CPML frequency shift $\alpha = $ factor$\cdot\pi f_\mathrm{min}$ (1/s) | Keep small; brief: ≥ 100 degrades low-frequency Re z |
@@ -284,7 +284,8 @@ $$h = \min\!\left(\frac{\lambda_\mathrm{min}}{\mathrm{ppw}},\ \frac{D_r}{\texttt
 `cell_budget`, validation fails (there is no automatic coarsening): raise $h$
 (lower `cells_across_radiator` or `ppw`, or set `h_override`), lower
 `f_max`, or raise `cell_budget` if RAM allows. The time step is
-$\Delta t = 0.99\,h/(c\sqrt3)$.
+$\Delta t = s\,h/(c\sqrt3)$, where $s$ is the resolved `cfl_safety`.
+When the key is omitted, $s$ is 0.99 unless the grid has cut cells, in which case $s = 0.7$.
 
 - **ppw (default 20) controls dispersion.** For a baffled circle in C8 at
   ppw 20, $\max|z - z_\mathrm{ref}| = 0.0102$ at $f_\mathrm{max}$ (gate

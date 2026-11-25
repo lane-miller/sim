@@ -12,7 +12,6 @@
   "numerics": {
     "h_override": 0.005,
     "cells_across_radiator": 10,
-    "cfl_safety": 0.99,
     "gap_cells": null,
     "cpml_cells": 16,
     "cpml_alpha_factor": 1.0,
